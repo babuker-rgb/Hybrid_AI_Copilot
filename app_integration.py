@@ -108,4 +108,91 @@ class HybridApp:
             (0.10, 1.2),      # MgSt
             (1.5, 8.0),       # MCC
             (0.5, 5.0),       # Moisture
-            (150.0,
+            (150.0, 250.0),   # Pressure
+            (15.0, 30.0)      # Speed
+        ]
+        
+        scaled = np.zeros_like(normalized)
+        for i, (min_val, max_val) in enumerate(ranges):
+            scaled[i] = normalized[i] * (max_val - min_val) + min_val
+        
+        return scaled
+
+def main():
+    """Main Streamlit application"""
+    st.set_page_config(
+        page_title="Hybrid AI · Tablet Optimization",
+        page_icon="🧬",
+        layout="wide"
+    )
+    
+    # Initialize app
+    app = HybridApp()
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        st.markdown(f"**Version:** v{config.get('version', '29.28-R32')}")
+        st.markdown(f"**Model:** {config['model']['architecture']}")
+        st.markdown(f"**Population:** {config['optimization']['population_size']}")
+        st.markdown(f"**Generations:** {config['optimization']['generations']}")
+        
+        st.divider()
+        
+        st.markdown("### 📊 Objectives")
+        for obj in config['optimization']['objectives']:
+            st.markdown(f"- {obj['name']} (weight: {obj['weight']})")
+    
+    # Main content
+    st.title("🧬 Hybrid AI · Multi-Objective Tablet Optimization")
+    st.markdown("#### Nile Valley University · Sudan · v29.28-R32")
+    
+    # Input parameters
+    with st.expander("🧪 Formulation Parameters", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            api = st.slider("API (%)", 80.0, 98.0, 90.0)
+            binder = st.slider("Binder (%)", 1.4, 6.0, 3.5)
+            pvpp = st.slider("PVPP (%)", 1.0, 6.0, 2.0)
+            mgst = st.slider("MgSt (%)", 0.10, 1.2, 0.5)
+        with col2:
+            mcc = st.slider("MCC (%)", 1.5, 8.0, 3.5)
+            moisture = st.slider("Moisture (%)", 0.5, 5.0, 2.0)
+            binder_grade = st.selectbox("Binder Grade", 
+                                       ["MCC PH101", "MCC PH102", "MCC PH200", "MCC KG"])
+            particle_size = st.slider("Particle Size (µm)", 10.0, 200.0, 50.0)
+    
+    with st.expander("⚙️ Process Parameters", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            pressure = st.slider("Compression Pressure (MPa)", 150.0, 250.0, 200.0)
+            speed = st.slider("Speed (rpm)", 15.0, 30.0, 20.0)
+            dwell_time = st.slider("Dwell Time (ms)", 5.0, 50.0, 25.0)
+        with col2:
+            friction = st.slider("Friction Coefficient", 0.1, 0.5, 0.25)
+            decompression = st.slider("Decompression Time (ms)", 10.0, 80.0, 35.0)
+            granule_size = st.slider("Granule Size (µm)", 30.0, 250.0, 125.0)
+    
+    # Optimization button
+    if st.button("🚀 Run Hybrid Optimization", type="primary"):
+        # Validate inputs
+        params = np.array([api, binder, pvpp, mgst, mcc, moisture, pressure, speed])
+        is_valid, message = validate_inputs({
+            'api': api, 'binder': binder, 'pvpp': pvpp, 'mgst': mgst,
+            'mcc': mcc, 'moisture': moisture, 'pressure': pressure, 'speed': speed
+        })
+        
+        if not is_valid:
+            st.error(f"Invalid inputs: {message}")
+            return
+        
+        # Run optimization
+        with st.spinner("Running optimization..."):
+            results = app.run_optimization(params)
+            st.success("✅ Optimization complete!")
+            
+            # Display results
+            app.display_results(results)
+
+if __name__ == "__main__":
+    main()
