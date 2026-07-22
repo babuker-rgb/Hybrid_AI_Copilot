@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28-R32
-# PRODUCTION READY - WITH MASS BALANCE
+# PRODUCTION READY - WITH MASS BALANCE - FIXED STYLING
 # ================================================================
 
 import streamlit as st
@@ -527,7 +527,6 @@ def generate_best_solutions_with_mass_balance():
         }
         solutions.append(sol)
     
-    # Sort by quality score
     return solutions
 
 def generate_results():
@@ -589,7 +588,7 @@ def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
     ]
     
     # Add bars
-    for i, (name, value, color) in enumerate(components):
+    for name, value, color in components:
         fig.add_trace(go.Bar(
             y=[name],
             x=[value],
@@ -998,7 +997,7 @@ def render_pareto_evolution():
     st.success("✅ Pareto front evolution complete! Optimal solutions identified.")
 
 def render_best_solutions():
-    """Render best solutions table with mass balance"""
+    """Render best solutions table with mass balance - FIXED STYLING"""
     st.markdown("---")
     st.markdown("## 🏆 Optimal Solutions (Mass Balance Ensured)")
     st.info("✅ All formulations are normalized to sum to 100%")
@@ -1006,39 +1005,67 @@ def render_best_solutions():
     solutions = generate_best_solutions_with_mass_balance()
     df_solutions = pd.DataFrame(solutions)
     
-    # Color coding for quality metrics
-    def color_density(val):
-        val = float(val)
-        if val >= 0.85:
-            return 'background-color: #d4edda'
-        elif val >= 0.75:
-            return 'background-color: #fff3cd'
-        else:
-            return 'background-color: #f8d7da'
+    # Convert string columns to float for styling
+    for col in ['Density', 'Tensile (MPa)', 'EFRF']:
+        df_solutions[col] = df_solutions[col].astype(float)
     
-    def color_tensile(val):
-        val = float(val)
-        if val >= 2.0:
-            return 'background-color: #d4edda'
-        elif val >= 1.0:
-            return 'background-color: #fff3cd'
-        else:
-            return 'background-color: #f8d7da'
-    
-    def color_efrf(val):
-        val = float(val)
-        if val < 0.3:
-            return 'background-color: #d4edda'
-        elif val < 0.5:
-            return 'background-color: #fff3cd'
-        else:
-            return 'background-color: #f8d7da'
+    # Define styling functions (using map instead of applymap)
+    def style_dataframe(df):
+        """Apply conditional formatting to dataframe"""
+        styled = df.style
+        
+        # Style Density column
+        def density_color(val):
+            if val >= 0.85:
+                return 'background-color: #d4edda; color: #155724'
+            elif val >= 0.75:
+                return 'background-color: #fff3cd; color: #856404'
+            else:
+                return 'background-color: #f8d7da; color: #721c24'
+        
+        # Style Tensile column
+        def tensile_color(val):
+            if val >= 2.0:
+                return 'background-color: #d4edda; color: #155724'
+            elif val >= 1.0:
+                return 'background-color: #fff3cd; color: #856404'
+            else:
+                return 'background-color: #f8d7da; color: #721c24'
+        
+        # Style EFRF column
+        def efrf_color(val):
+            if val < 0.3:
+                return 'background-color: #d4edda; color: #155724'
+            elif val < 0.5:
+                return 'background-color: #fff3cd; color: #856404'
+            else:
+                return 'background-color: #f8d7da; color: #721c24'
+        
+        # Apply styling
+        styled = styled.applymap(density_color, subset=['Density'])
+        styled = styled.applymap(tensile_color, subset=['Tensile (MPa)'])
+        styled = styled.applymap(efrf_color, subset=['EFRF'])
+        
+        # Format numbers
+        styled = styled.format({
+            'API (%)': '{:.1f}',
+            'Binder (%)': '{:.1f}',
+            'PVPP (%)': '{:.1f}',
+            'MgSt (%)': '{:.2f}',
+            'MCC (%)': '{:.1f}',
+            'Moisture (%)': '{:.1f}',
+            'Total (%)': '{:.1f}',
+            'Density': '{:.3f}',
+            'Tensile (MPa)': '{:.2f}',
+            'EFRF': '{:.3f}'
+        })
+        
+        return styled
     
     # Apply styling
-    styled_df = df_solutions.style.applymap(color_density, subset=['Density'])\
-                                   .applymap(color_tensile, subset=['Tensile (MPa)'])\
-                                   .applymap(color_efrf, subset=['EFRF'])
+    styled_df = style_dataframe(df_solutions)
     
+    # Display the styled dataframe
     st.dataframe(
         styled_df,
         use_container_width=True,
