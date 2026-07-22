@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28-R32
-# COMPLETE PRODUCTION VERSION WITH ALL ENHANCEMENTS
+# FULLY INTEGRATED WITH ENHANCED VISUALIZATIONS
 # ================================================================
 
 import streamlit as st
@@ -380,7 +380,7 @@ class NSGAIIOptimizer:
         yield population, objectives, history, self.generations
 
 # ================================================================
-# SIMULATION FUNCTIONS (for demo / replace with actual optimizer)
+# SIMULATION FUNCTIONS (for demo)
 # ================================================================
 
 def simulate_training(epochs=1200):
@@ -516,14 +516,17 @@ def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
             st.caption(f"{name}: {summary[name]:.1f}%")
 
 def render_binder_grade_comparison():
-    """Show how binder grade affects key properties"""
-    st.markdown("### 🔬 Binder Grade Impact")
-    grades = pd.DataFrame([
+    """Show binder grade impact with a bar chart"""
+    st.markdown("---")
+    st.markdown("## 🔬 Binder Grade Impact")
+    
+    # Create dataframe from BINDER_GRADES
+    df_binder = pd.DataFrame([
         {
-            "Grade": name,
-            "Compressibility": props["compressibility"],
-            "Disintegration": props["disintegration"],
-            "Flowability": props["flow"]
+            "Binder Grade": name,
+            "Compressibility": props["compressibility"] * 100,
+            "Disintegration": props["disintegration"] * 100,
+            "Flowability": props["flow"] * 100
         }
         for name, props in BINDER_GRADES.items()
     ])
@@ -531,20 +534,21 @@ def render_binder_grade_comparison():
     fig = go.Figure()
     for col in ["Compressibility", "Disintegration", "Flowability"]:
         fig.add_trace(go.Bar(
-            x=grades["Grade"],
-            y=grades[col],
+            x=df_binder["Binder Grade"],
+            y=df_binder[col],
             name=col,
-            text=[f"{v:.0%}" for v in grades[col]],
+            text=[f"{v:.0f}%" for v in df_binder[col]],
             textposition="outside"
         ))
     fig.update_layout(
         barmode="group",
         title="Binder Grade Properties",
-        yaxis=dict(tickformat=".0%", range=[0, 1]),
-        height=300,
+        yaxis=dict(title="Score (%)", range=[0, 100]),
+        height=350,
         margin=dict(l=0, r=0, t=40, b=0),
         plot_bgcolor='rgba(0,0,0,0)',
-        paper_bgcolor='rgba(0,0,0,0)'
+        paper_bgcolor='rgba(0,0,0,0)',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -568,7 +572,6 @@ def render_input_panel():
         selected_grade = st.selectbox("**Binder Grade**", BINDER_GRADE_NAMES, index=grade_index)
         st.session_state.binder_grade = BINDER_GRADE_NAMES.index(selected_grade)
         
-        # Binder grade impact info
         grade_props = BINDER_GRADES[selected_grade]
         st.caption(f"🔍 **{selected_grade} Properties:**")
         st.caption(f"• Compressibility: {grade_props['compressibility']:.0%}")
@@ -593,9 +596,6 @@ def render_input_panel():
         st.session_state.dwell_time = st.slider("**Dwell Time (ms)**", DWELL_TIME_MIN, DWELL_TIME_MAX, st.session_state.dwell_time, step=1.0)
         st.session_state.friction = st.slider("**Friction Coefficient**", FRICTION_MIN, FRICTION_MAX, st.session_state.friction, step=0.01)
         st.session_state.decompression_time = st.slider("**Decompression Time (ms)**", DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, step=2.0)
-    
-    # Add binder grade comparison chart
-    render_binder_grade_comparison()
 
 def render_results_summary(results):
     st.markdown("---")
@@ -834,6 +834,92 @@ def render_golden_solution(golden):
     
     st.success("✅ **This formulation meets all constraints and provides the best balance between competing objectives!**")
 
+def render_side_by_side_comparison(golden, solutions):
+    """Show Golden Solution vs other Pareto candidates"""
+    if not golden or not solutions:
+        return
+    
+    st.markdown("---")
+    st.markdown("## 📊 Side‑by‑Side Comparison")
+    
+    # Select top 3 solutions (including golden)
+    top_solutions = solutions[:3]
+    
+    # Create a DataFrame for comparison
+    comparison_data = []
+    for sol in top_solutions:
+        comparison_data.append({
+            "Solution": sol['Solution'],
+            "API (%)": sol['API (%)'],
+            "Binder (%)": sol['Binder (%)'],
+            "PVPP (%)": sol['PVPP (%)'],
+            "MgSt (%)": sol['MgSt (%)'],
+            "MCC (%)": sol['MCC (%)'],
+            "Moisture (%)": sol['Moisture (%)'],
+            "Density": sol['Density'],
+            "Tensile (MPa)": sol['Tensile (MPa)'],
+            "EFRF": sol['EFRF'],
+            "Quality Score": sol['Quality Score']
+        })
+    
+    df_comp = pd.DataFrame(comparison_data)
+    
+    # Highlight Golden Solution in the table
+    def highlight_golden(row):
+        return ['background-color: #d4edda' if row['Solution'] == top_solutions[0]['Solution'] else '' for _ in row]
+    
+    st.dataframe(
+        df_comp.style.apply(highlight_golden, axis=1),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Solution": st.column_config.TextColumn("Solution"),
+            "API (%)": st.column_config.NumberColumn("API (%)", format="%.1f"),
+            "Binder (%)": st.column_config.NumberColumn("Binder (%)", format="%.1f"),
+            "PVPP (%)": st.column_config.NumberColumn("PVPP (%)", format="%.1f"),
+            "MgSt (%)": st.column_config.NumberColumn("MgSt (%)", format="%.2f"),
+            "MCC (%)": st.column_config.NumberColumn("MCC (%)", format="%.1f"),
+            "Moisture (%)": st.column_config.NumberColumn("Moisture (%)", format="%.1f"),
+            "Density": st.column_config.NumberColumn("Density", format="%.3f"),
+            "Tensile (MPa)": st.column_config.NumberColumn("Tensile (MPa)", format="%.2f"),
+            "EFRF": st.column_config.NumberColumn("EFRF", format="%.3f"),
+            "Quality Score": st.column_config.NumberColumn("Quality Score", format="%.1f"),
+        }
+    )
+    
+    # Radar chart for comparison
+    st.markdown("### 🎯 Performance Radar")
+    fig_radar = go.Figure()
+    
+    categories = ['Density', 'Tensile', 'EFRF (inverted)']
+    
+    for sol in top_solutions:
+        fig_radar.add_trace(go.Scatterpolar(
+            r=[
+                sol['Density'] / 0.95 * 100,  # normalize to 100
+                sol['Tensile (MPa)'] / 8.5 * 100,
+                (1 - sol['EFRF']) * 100
+            ],
+            theta=categories,
+            fill='toself',
+            name=sol['Solution'],
+            line=dict(width=2)
+        ))
+    
+    fig_radar.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickformat='.0f'
+            )
+        ),
+        showlegend=True,
+        height=400,
+        margin=dict(l=40, r=40, t=40, b=40)
+    )
+    st.plotly_chart(fig_radar, use_container_width=True)
+
 def render_best_solutions():
     st.markdown("---")
     st.markdown("## 🏆 Optimal Solutions (Mass Balance Ensured)")
@@ -844,6 +930,10 @@ def render_best_solutions():
     
     render_golden_solution(golden)
     
+    # Side-by-side comparison
+    render_side_by_side_comparison(golden, solutions)
+    
+    # Full solutions table
     df_solutions = pd.DataFrame(solutions)
     
     df_display = df_solutions.copy()
@@ -960,6 +1050,10 @@ def main():
     st.markdown("#### Nile Valley University · Sudan · v29.28‑R32")
     st.markdown("---")
     render_input_panel()
+    
+    # Binder grade impact comparison (shown always)
+    render_binder_grade_comparison()
+    
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
