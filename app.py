@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28-R32
-# UNIFIED DASHBOARD – ALL VISUALIZATIONS INTEGRATED
+# UNIFIED DASHBOARD – COMPLETE & FIXED
 # ================================================================
 
 import streamlit as st
@@ -10,12 +10,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import time
 import warnings
-from datetime import datetime
 import json
-import plotly.express as px
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
@@ -83,13 +81,12 @@ initialize_session_state()
 # HELPER FUNCTIONS
 # ================================================================
 def normalize_formulation(api, binder, pvpp, mgst, mcc, moisture):
-    components = np.array([api, binder, pvpp, mgst, mcc, moisture])
-    total = np.sum(components)
-    normalized = (components / total) * 100
+    comps = np.array([api, binder, pvpp, mgst, mcc, moisture])
+    total = np.sum(comps)
+    norm = (comps / total) * 100
     return {
-        'api': normalized[0], 'binder': normalized[1], 'pvpp': normalized[2],
-        'mgst': normalized[3], 'mcc': normalized[4], 'moisture': normalized[5],
-        'total': 100.0
+        'api': norm[0], 'binder': norm[1], 'pvpp': norm[2],
+        'mgst': norm[3], 'mcc': norm[4], 'moisture': norm[5], 'total': 100.0
     }
 
 def get_formulation_summary(api, binder, pvpp, mgst, mcc, moisture):
@@ -160,7 +157,9 @@ class HybridTabletModel(nn.Module):
 
 class NSGAIIOptimizer:
     def __init__(self, model, pop_size=50, generations=80):
-        self.model = model; self.pop_size = pop_size; self.generations = generations
+        self.model = model
+        self.pop_size = pop_size
+        self.generations = generations
         self.n_objectives = 3
     def enforce_mass_balance(self, pop):
         balanced = pop.copy()
@@ -176,10 +175,14 @@ class NSGAIIOptimizer:
             pred = self.model.predict(pop)
         return np.column_stack([-pred[:, 0], -pred[:, 1], pred[:, 2]])
     def fast_non_dominated_sort(self, obj):
-        n = len(obj); fronts = []; dom_count = np.zeros(n, dtype=int); dom_sol = [[] for _ in range(n)]
+        n = len(obj)
+        fronts = []
+        dom_count = np.zeros(n, dtype=int)
+        dom_sol = [[] for _ in range(n)]
         for i in range(n):
             for j in range(n):
-                if i == j: continue
+                if i == j:
+                    continue
                 if np.all(obj[i] <= obj[j]) and np.any(obj[i] < obj[j]):
                     dom_sol[i].append(j)
                 elif np.all(obj[j] <= obj[i]) and np.any(obj[j] < obj[i]):
@@ -194,31 +197,36 @@ class NSGAIIOptimizer:
                     dom_count[j] -= 1
                     if dom_count[j] == 0:
                         next_front.append(j)
-            if not next_front: break
-            fronts.append(next_front); curr += 1
+            if not next_front:
+                break
+            fronts.append(next_front)
+            curr += 1
         return fronts
     def crowding_distance(self, obj, front):
         n = len(front)
-        if n <= 2: return np.ones(n) * np.inf
+        if n <= 2:
+            return np.ones(n) * np.inf
         dist = np.zeros(n)
         for m in range(self.n_objectives):
             sorted_front = sorted(front, key=lambda x: obj[x][m])
-            dist[0] = np.inf; dist[-1] = np.inf
-            min_val = obj[sorted_front[0]][m]; max_val = obj[sorted_front[-1]][m]
+            dist[0] = np.inf
+            dist[-1] = np.inf
+            min_val = obj[sorted_front[0]][m]
+            max_val = obj[sorted_front[-1]][m]
             if max_val > min_val:
                 for i in range(1, n-1):
                     dist[i] += (obj[sorted_front[i+1]][m] - obj[sorted_front[i-1]][m]) / (max_val - min_val)
         return dist
     def optimize(self, n_vars):
         pop = np.random.rand(self.pop_size, n_vars)
-        pop[:, 0] = pop[:, 0]*18 + 80
-        pop[:, 1] = pop[:, 1]*4.6 + 1.4
-        pop[:, 2] = pop[:, 2]*5 + 1
-        pop[:, 3] = pop[:, 3]*1.1 + 0.1
-        pop[:, 4] = pop[:, 4]*6.5 + 1.5
-        pop[:, 5] = pop[:, 5]*4.5 + 0.5
-        pop[:, 6] = pop[:, 6]*100 + 150
-        pop[:, 7] = pop[:, 7]*15 + 15
+        pop[:, 0] = pop[:, 0] * 18 + 80
+        pop[:, 1] = pop[:, 1] * 4.6 + 1.4
+        pop[:, 2] = pop[:, 2] * 5 + 1
+        pop[:, 3] = pop[:, 3] * 1.1 + 0.1
+        pop[:, 4] = pop[:, 4] * 6.5 + 1.5
+        pop[:, 5] = pop[:, 5] * 4.5 + 0.5
+        pop[:, 6] = pop[:, 6] * 100 + 150
+        pop[:, 7] = pop[:, 7] * 15 + 15
         pop = self.enforce_mass_balance(pop)
         obj = self.evaluate(pop)
         history = []
@@ -229,8 +237,10 @@ class NSGAIIOptimizer:
                 i1, i2 = np.random.choice(self.pop_size, 2, replace=False)
                 r1 = next(i for i, f in enumerate(fronts) if i1 in f)
                 r2 = next(i for i, f in enumerate(fronts) if i2 in f)
-                if r1 < r2: selected.append(i1)
-                elif r2 < r1: selected.append(i2)
+                if r1 < r2:
+                    selected.append(i1)
+                elif r2 < r1:
+                    selected.append(i2)
                 else:
                     d1 = self.crowding_distance(obj, fronts[r1])[fronts[r1].index(i1)]
                     d2 = self.crowding_distance(obj, fronts[r2])[fronts[r2].index(i2)]
@@ -238,23 +248,27 @@ class NSGAIIOptimizer:
             sel_pop = pop[selected]
             offspring = []
             for i in range(0, self.pop_size, 2):
-                p1 = sel_pop[i]; p2 = sel_pop[(i+1) % self.pop_size]
+                p1 = sel_pop[i]
+                p2 = sel_pop[(i+1) % self.pop_size]
                 if np.random.random() < 0.8:
-                    c1 = np.zeros_like(p1); c2 = np.zeros_like(p2)
+                    c1 = np.zeros_like(p1)
+                    c2 = np.zeros_like(p2)
                     for j in range(n_vars):
                         if np.random.random() < 0.5:
                             beta = 1.0 + 2.0 * np.random.random()
                             c1[j] = 0.5 * ((1+beta)*p1[j] + (1-beta)*p2[j])
                             c2[j] = 0.5 * ((1-beta)*p1[j] + (1+beta)*p2[j])
                         else:
-                            c1[j] = p1[j]; c2[j] = p2[j]
+                            c1[j] = p1[j]
+                            c2[j] = p2[j]
                 else:
-                    c1 = p1.copy(); c2 = p2.copy()
+                    c1 = p1.copy()
+                    c2 = p2.copy()
                 for child in [c1, c2]:
                     if np.random.random() < 0.1:
                         for j in range(n_vars):
                             if np.random.random() < 0.1:
-                                child[j] = np.clip(child[j] + np.random.normal(0, 0.1)*(100 if j<6 else 30), 0, 100)
+                                child[j] = np.clip(child[j] + np.random.normal(0, 0.1) * (100 if j < 6 else 30), 0, 100)
                 offspring.extend([c1, c2])
             offspring = np.array(offspring[:self.pop_size])
             offspring = self.enforce_mass_balance(offspring)
@@ -262,7 +276,8 @@ class NSGAIIOptimizer:
             combined_pop = np.vstack([pop, offspring])
             combined_obj = np.vstack([obj, off_obj])
             combined_fronts = self.fast_non_dominated_sort(combined_obj)
-            new_pop = []; remaining = self.pop_size
+            new_pop = []
+            remaining = self.pop_size
             for front in combined_fronts:
                 if len(new_pop) + len(front) <= remaining:
                     new_pop.extend(front)
@@ -294,14 +309,14 @@ class NSGAIIOptimizer:
 def simulate_training(epochs=1200):
     loss_h, r2_h, rmse_h = [], [], []
     for epoch in range(epochs):
-        base = np.exp(-epoch/300)*0.5 + 0.01
-        loss = max(0.001, base + np.random.normal(0,0.005))
+        base = np.exp(-epoch/300) * 0.5 + 0.01
+        loss = max(0.001, base + np.random.normal(0, 0.005))
         loss_h.append(loss)
-        r2 = min(0.99, max(0, 1 - loss*1.5 + np.random.normal(0,0.01)))
+        r2 = min(0.99, max(0, 1 - loss*1.5 + np.random.normal(0, 0.01)))
         r2_h.append(r2)
-        rmse = np.sqrt(loss) + np.random.normal(0,0.005)
+        rmse = np.sqrt(loss) + np.random.normal(0, 0.005)
         rmse_h.append(rmse)
-        if epoch % 100 == 0 or epoch == epochs-1:
+        if epoch % 100 == 0 or epoch == epochs - 1:
             yield epoch, loss, r2, rmse, loss_h, r2_h, rmse_h
 
 def generate_best_solutions_with_mass_balance():
@@ -322,10 +337,16 @@ def generate_best_solutions_with_mass_balance():
         quality = calculate_quality_score(density, tensile, efrf)
         solutions.append({
             'Solution': f'S{i+1}',
-            'API (%)': norm[0], 'Binder (%)': norm[1], 'PVPP (%)': norm[2],
-            'MgSt (%)': norm[3], 'MCC (%)': norm[4], 'Moisture (%)': norm[5],
+            'API (%)': norm[0],
+            'Binder (%)': norm[1],
+            'PVPP (%)': norm[2],
+            'MgSt (%)': norm[3],
+            'MCC (%)': norm[4],
+            'Moisture (%)': norm[5],
             'Total (%)': np.sum(norm),
-            'Density': density, 'Tensile (MPa)': tensile, 'EFRF': efrf,
+            'Density': density,
+            'Tensile (MPa)': tensile,
+            'EFRF': efrf,
             'Quality Score': quality['overall']
         })
     solutions.sort(key=lambda x: x['Quality Score'], reverse=True)
@@ -341,7 +362,7 @@ def generate_results():
     }
 
 # ================================================================
-# UI RENDER FUNCTIONS – All components
+# UI RENDER FUNCTIONS
 # ================================================================
 
 def render_sidebar():
@@ -371,8 +392,10 @@ def render_binder_grade_comparison():
     st.markdown("---")
     st.markdown("## 🔬 Binder Grade Impact")
     df = pd.DataFrame([
-        {"Binder Grade": name, "Compressibility": p["compressibility"]*100,
-         "Disintegration": p["disintegration"]*100, "Flowability": p["flow"]*100}
+        {"Binder Grade": name,
+         "Compressibility": p["compressibility"]*100,
+         "Disintegration": p["disintegration"]*100,
+         "Flowability": p["flow"]*100}
         for name, p in BINDER_GRADES.items()
     ])
     fig = go.Figure()
@@ -381,10 +404,15 @@ def render_binder_grade_comparison():
             x=df["Binder Grade"], y=df[col], name=col,
             text=[f"{v:.0f}%" for v in df[col]], textposition="outside"
         ))
-    fig.update_layout(barmode="group", title="Binder Grade Properties",
-                      yaxis=dict(title="Score (%)", range=[0,100]),
-                      height=350, margin=dict(l=0,r=0,t=40,b=0),
-                      plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+    fig.update_layout(
+        barmode="group",
+        title="Binder Grade Properties",
+        yaxis=dict(title="Score (%)", range=[0, 100]),
+        height=350,
+        margin=dict(l=0, r=0, t=40, b=0),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
@@ -400,15 +428,21 @@ def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
     ]
     fig = go.Figure()
     for name, value, color in components:
-        fig.add_trace(go.Bar(y=[name], x=[value], orientation='h',
-                             name=name, marker_color=color,
-                             text=f'{value:.1f}%', textposition='outside'))
-    fig.update_layout(xaxis=dict(title='Percentage (%)', range=[0,105]),
-                      height=250, showlegend=False, barmode='stack',
-                      margin=dict(l=0,r=0,t=40,b=0),
-                      plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    col1, col2 = st.columns([3,1])
-    with col1: st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Bar(
+            y=[name], x=[value], orientation='h',
+            name=name, marker_color=color,
+            text=f'{value:.1f}%', textposition='outside'
+        ))
+    fig.update_layout(
+        xaxis=dict(title='Percentage (%)', range=[0, 105]),
+        height=250, showlegend=False, barmode='stack',
+        margin=dict(l=0, r=0, t=40, b=0),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.plotly_chart(fig, use_container_width=True)
     with col2:
         st.metric("**Total**", f"{summary['Total']:.1f}%", "✅ Mass Balance")
         for name in ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture']:
@@ -437,9 +471,11 @@ def render_input_panel():
         st.caption(f"• Disintegration: {props['disintegration']:.0%}")
         st.caption(f"• Flowability: {props['flow']:.0%}")
         st.session_state.particle_size = st.slider("**Particle Size (µm)**", PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX, st.session_state.particle_size, step=5.0)
-    render_mass_balance_display(st.session_state.api, st.session_state.binder,
-                                st.session_state.pvpp, st.session_state.mgst,
-                                st.session_state.mcc, st.session_state.moisture)
+    render_mass_balance_display(
+        st.session_state.api, st.session_state.binder,
+        st.session_state.pvpp, st.session_state.mgst,
+        st.session_state.mcc, st.session_state.moisture
+    )
     st.markdown("---")
     st.markdown("## ⚙️ Process Parameters")
     col3, col4 = st.columns(2)
@@ -466,7 +502,7 @@ def render_results_summary(results):
     with col3:
         st.metric("**Dissolution τ**", f"{results['dissolution']:.1f} min", "✅ Target: ≤20 min")
         st.metric("**Overall Quality Score**", f"{quality['overall']:.1f}%",
-                 "Good" if quality['overall']>60 else "Needs Improvement")
+                 "Good" if quality['overall'] > 60 else "Needs Improvement")
     with st.expander("📊 Quality Score Breakdown", expanded=False):
         st.markdown(f"""
         | Component | Score | Weight | Contribution |
@@ -480,8 +516,10 @@ def render_results_summary(results):
 def render_training_progress():
     st.markdown("---")
     st.markdown("## 🔍 Training Progress")
-    loss_chart = st.empty(); metrics_chart = st.empty()
-    progress_bar = st.progress(0); status_text = st.empty()
+    loss_chart = st.empty()
+    metrics_chart = st.empty()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     loss_h, r2_h, rmse_h = [], [], []
     for epoch, loss, r2, rmse, lh, r2h, rmseh in simulate_training(TRAINING_EPOCHS):
         loss_h, r2_h, rmse_h = lh, r2h, rmseh
@@ -494,7 +532,7 @@ def render_training_progress():
         fig_metrics.add_trace(go.Scatter(y=rmse_h, mode='lines', name='RMSE', line=dict(color='#5c7cfa', width=2)))
         fig_metrics.update_layout(title='Model Performance', xaxis_title='Epoch', yaxis_title='Metric Value', height=250)
         metrics_chart.plotly_chart(fig_metrics, use_container_width=True, key=f"metrics_{epoch}")
-        progress_bar.progress((epoch+1)/TRAINING_EPOCHS)
+        progress_bar.progress((epoch+1) / TRAINING_EPOCHS)
         status_text.text(f"Epoch {epoch+1}/{TRAINING_EPOCHS} · Loss: {loss:.4f} · R²: {r2:.3f} · RMSE: {rmse:.3f}")
         time.sleep(0.001)
     progress_bar.empty()
@@ -529,7 +567,8 @@ def render_pareto_evolution():
         alpha = 0.1 + 0.2 * (i / max(1, len(pareto_history[:gen_slider:10])))
         fig.add_trace(go.Scatter3d(
             x=front[:,0], y=front[:,1], z=front[:,2],
-            mode='markers', marker=dict(size=4, opacity=alpha, color='lightgray'),
+            mode='markers',
+            marker=dict(size=4, opacity=alpha, color='lightgray'),
             name=f'Gen {i*10}', showlegend=False,
             hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>'
         ))
@@ -537,9 +576,11 @@ def render_pareto_evolution():
     fig.add_trace(go.Scatter3d(
         x=current[:,0], y=current[:,1], z=current[:,2],
         mode='markers',
-        marker=dict(size=8, color=quality, colorscale='Viridis', showscale=True,
-                    colorbar=dict(title="Quality Score", x=1.02, len=0.6),
-                    opacity=0.9, line=dict(width=1, color='black')),
+        marker=dict(
+            size=8, color=quality, colorscale='Viridis',
+            showscale=True, colorbar=dict(title="Quality Score", x=1.02, len=0.6),
+            opacity=0.9, line=dict(width=1, color='black')
+        ),
         name=f'Generation {gen_slider}',
         hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>'
     ))
@@ -553,19 +594,27 @@ def render_pareto_evolution():
         ))
     fig.update_layout(
         title=f'Pareto Front Evolution - Generation {gen_slider}',
-        scene=dict(xaxis=dict(title='Density', range=[0.55,0.95]),
-                   yaxis=dict(title='Tensile Strength (MPa)', range=[0.5,8.5]),
-                   zaxis=dict(title='EFRF', range=[0,1]),
-                   camera=dict(eye=dict(x=1.8,y=1.8,z=1.8))),
-        height=550, margin=dict(l=0,r=0,t=50,b=0),
-        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+        scene=dict(
+            xaxis=dict(title='Density', range=[0.55,0.95]),
+            yaxis=dict(title='Tensile Strength (MPa)', range=[0.5,8.5]),
+            zaxis=dict(title='EFRF', range=[0,1]),
+            camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
+        ),
+        height=550, margin=dict(l=0, r=0, t=50, b=0),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     chart.plotly_chart(fig, use_container_width=True)
-    st.caption(f"**Generation {gen_slider+1}/{generations}** · Solutions: {len(current)} · Convergence: {0.3+0.7*(gen_slider/generations):.1%}")
+    st.caption(
+        f"**Generation {gen_slider+1}/{generations}** · "
+        f"Solutions: {len(current)} · "
+        f"Convergence: {0.3 + 0.7 * (gen_slider / generations):.1%}"
+    )
 
 def render_golden_solution(golden):
-    if not golden: return
+    if not golden:
+        return
     st.markdown("---")
     st.markdown("## 🏆 Golden Solution (Balanced Trade-off)")
     st.markdown(f"""
@@ -588,39 +637,51 @@ def render_golden_solution(golden):
     """, unsafe_allow_html=True)
     st.success("✅ This formulation meets all constraints and provides the best balance between competing objectives!")
 
+# ================================================================
+# COMPLETED: SIDE-BY-SIDE COMPARISON (FIXED)
+# ================================================================
 def render_side_by_side_comparison(golden, all_solutions):
-    if not golden or not all_solutions: return
+    if not golden or not all_solutions:
+        return
+
     st.markdown("---")
     st.markdown("## 📊 Side‑by‑Side Comparison")
-    top = all_solutions[:3]  # golden + next two
+
+    # Show top 3 solutions (Golden + next two best)
+    top = all_solutions[:3]
     df = pd.DataFrame(top)
-    df_display = df.copy()
-    for col in ['API (%)', 'Binder (%)', 'PVPP (%)', 'MCC (%)', 'Moisture (%)']:
-        df_display[col] = df_display[col].round(1)
-    df_display['MgSt (%)'] = df_display['MgSt (%)'].round(2)
-    df_display['Density'] = df_display['Density'].round(3)
-    df_display['Tensile (MPa)'] = df_display['Tensile (MPa)'].round(2)
-    df_display['EFRF'] = df_display['EFRF'].round(3)
-    df_display['Quality Score'] = df_display['Quality Score'].round(1)
-    st.dataframe(df_display[['Solution','API (%)','Binder (%)','PVPP (%)','MgSt (%)',
-                             'MCC (%)','Moisture (%)','Density','Tensile (MPa)',
-                             'EFRF','Quality Score']], use_container_width=True)
+
+    # Display table
+    st.dataframe(df[['Solution','API (%)','Binder (%)','PVPP (%)','MgSt (%)',
+                     'MCC (%)','Moisture (%)','Density','Tensile (MPa)',
+                     'EFRF','Quality Score']], use_container_width=True)
+
+    # Radar chart for performance comparison
     st.markdown("### 🎯 Performance Radar")
-    fig_radar = go.Figure()
-    categories = ['Density', 'Tensile', 'EFRF (inverted)', 'Quality Score']
+    categories = ["Density", "Tensile (MPa)", "EFRF (inverted)", "Quality Score"]
+
+    fig = go.Figure()
     for _, row in df.iterrows():
-        fig_radar.add_trace(go.Scatterpolar(
-            r=[row['Density']/0.95, row['Tensile (MPa)']/8.5, 1-row['EFRF'], row['Quality Score']/100],
+        fig.add_trace(go.Scatterpolar(
+            r=[
+                row["Density"] / 0.95,
+                row["Tensile (MPa)"] / 8.5,
+                1 - row["EFRF"],
+                row["Quality Score"] / 100
+            ],
             theta=categories,
             fill='toself',
-            name=row['Solution']
+            name=row["Solution"]
         ))
-    fig_radar.update_layout(
+
+    fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0,1])),
-        showlegend=True, height=400,
-        margin=dict(l=40,r=40,t=40,b=40)
+        showlegend=True,
+        height=400,
+        margin=dict(l=40, r=40, t=40, b=40),
+        title="Performance Comparison Across Solutions"
     )
-    st.plotly_chart(fig_radar, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
 
 def render_best_solutions():
     st.markdown("---")
@@ -628,8 +689,11 @@ def render_best_solutions():
     st.info("✅ All formulations are normalized to sum to 100%")
     solutions, golden = generate_best_solutions_with_mass_balance()
     st.session_state.golden_solution = golden
+
     render_golden_solution(golden)
     render_side_by_side_comparison(golden, solutions)
+
+    # Full table
     df = pd.DataFrame(solutions)
     df_display = df.copy()
     for col in ['API (%)', 'Binder (%)', 'PVPP (%)', 'MCC (%)', 'Moisture (%)', 'Total (%)']:
@@ -639,21 +703,36 @@ def render_best_solutions():
     df_display['Tensile (MPa)'] = df_display['Tensile (MPa)'].round(2)
     df_display['EFRF'] = df_display['EFRF'].round(3)
     df_display['Quality Score'] = df_display['Quality Score'].round(1)
+
     st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+    # Download buttons
     csv = df.to_csv(index=False)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     col1, col2 = st.columns(2)
     with col1:
-        st.download_button("📥 Download Optimization Report (CSV)", data=csv,
-                           file_name=f"results_{timestamp}.csv", mime="text/csv", use_container_width=True)
+        st.download_button("📥 Download Optimization Report (CSV)",
+                           data=csv,
+                           file_name=f"results_{timestamp}.csv",
+                           mime="text/csv",
+                           use_container_width=True)
     with col2:
-        json_report = {'timestamp': timestamp, 'golden_solution': golden,
-                       'all_solutions': df.to_dict('records'),
-                       'parameters': {'population': POPULATION_SIZE, 'generations': NSGA_GENERATIONS,
-                                      'epochs': TRAINING_EPOCHS, 'runtime_seconds': st.session_state.runtime}}
+        json_report = {
+            'timestamp': timestamp,
+            'golden_solution': golden,
+            'all_solutions': df.to_dict('records'),
+            'parameters': {
+                'population': POPULATION_SIZE,
+                'generations': NSGA_GENERATIONS,
+                'epochs': TRAINING_EPOCHS,
+                'runtime_seconds': st.session_state.runtime
+            }
+        }
         st.download_button("📥 Download Full Report (JSON)",
                            data=json.dumps(json_report, indent=2),
-                           file_name=f"report_{timestamp}.json", mime="application/json", use_container_width=True)
+                           file_name=f"report_{timestamp}.json",
+                           mime="application/json",
+                           use_container_width=True)
 
 def render_optimization_summary():
     st.markdown("---")
@@ -661,15 +740,26 @@ def render_optimization_summary():
     col1, col2 = st.columns([2,1])
     with col1:
         stats = pd.DataFrame({
-            'Metric': ['Total Solutions Evaluated', 'Pareto Solutions Found', 'Best Density',
-                       'Best Tensile', 'Best EFRF', 'Mass Balance', 'Evaluations/Second', 'Hardware'],
-            'Value': [f'{POPULATION_SIZE*NSGA_GENERATIONS:,}', f'{np.random.randint(8,15)}',
-                      f'{0.85+0.10*np.random.random():.3f}',
-                      f'{2.0+1.5*np.random.random():.2f} MPa',
-                      f'{0.15+0.20*np.random.random():.3f}',
-                      '✅ 100% (Enforced)',
-                      f'{(POPULATION_SIZE*NSGA_GENERATIONS)/max(1, st.session_state.runtime):.1f}',
-                      'CPU (Simulated)']
+            'Metric': [
+                'Total Solutions Evaluated',
+                'Pareto Solutions Found',
+                'Best Density',
+                'Best Tensile',
+                'Best EFRF',
+                'Mass Balance',
+                'Evaluations/Second',
+                'Hardware'
+            ],
+            'Value': [
+                f'{POPULATION_SIZE * NSGA_GENERATIONS:,}',
+                f'{np.random.randint(8, 15)}',
+                f'{0.85 + 0.10 * np.random.random():.3f}',
+                f'{2.0 + 1.5 * np.random.random():.2f} MPa',
+                f'{0.15 + 0.20 * np.random.random():.3f}',
+                '✅ 100% (Enforced)',
+                f'{(POPULATION_SIZE * NSGA_GENERATIONS) / max(1, st.session_state.runtime):.1f}',
+                'CPU (Simulated)'
+            ]
         })
         st.dataframe(stats, hide_index=True, use_container_width=True)
     with col2:
@@ -692,14 +782,17 @@ def main():
     render_input_panel()
     render_binder_grade_comparison()
     st.markdown("---")
-    col1, col2, col3 = st.columns([1,2,1])
+    col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         run = st.button("🚀 Run Hybrid Optimization", type="primary", use_container_width=True)
+
     if run:
         start = time.time()
-        valid, msg = validate_formulation(st.session_state.api, st.session_state.binder,
-                                          st.session_state.pvpp, st.session_state.mgst,
-                                          st.session_state.mcc, st.session_state.moisture)
+        valid, msg = validate_formulation(
+            st.session_state.api, st.session_state.binder,
+            st.session_state.pvpp, st.session_state.mgst,
+            st.session_state.mcc, st.session_state.moisture
+        )
         if not valid:
             st.error(f"❌ {msg}")
             return
