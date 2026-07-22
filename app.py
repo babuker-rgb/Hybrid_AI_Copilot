@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28-R32
-# UNIFIED DASHBOARD – COMPLETE & FIXED
+# COMPLETE UNIFIED DASHBOARD – FINAL VERSION
 # ================================================================
 
 import streamlit as st
@@ -304,7 +304,7 @@ class NSGAIIOptimizer:
         yield pop, obj, history, self.generations
 
 # ================================================================
-# SIMULATION FUNCTIONS (demo data)
+# SIMULATION FUNCTIONS (demo data – replace with actual optimizer output)
 # ================================================================
 def simulate_training(epochs=1200):
     loss_h, r2_h, rmse_h = [], [], []
@@ -637,34 +637,24 @@ def render_golden_solution(golden):
     """, unsafe_allow_html=True)
     st.success("✅ This formulation meets all constraints and provides the best balance between competing objectives!")
 
-# ================================================================
-# COMPLETED: SIDE-BY-SIDE COMPARISON (FIXED)
-# ================================================================
 def render_side_by_side_comparison(golden, all_solutions):
     if not golden or not all_solutions:
         return
-
     st.markdown("---")
     st.markdown("## 📊 Side‑by‑Side Comparison")
-
-    # Show top 3 solutions (Golden + next two best)
     top = all_solutions[:3]
     df = pd.DataFrame(top)
-
-    # Display table
     st.dataframe(df[['Solution','API (%)','Binder (%)','PVPP (%)','MgSt (%)',
                      'MCC (%)','Moisture (%)','Density','Tensile (MPa)',
                      'EFRF','Quality Score']], use_container_width=True)
-
-    # Radar chart for performance comparison
+    # Radar chart with normalized axes
     st.markdown("### 🎯 Performance Radar")
     categories = ["Density", "Tensile (MPa)", "EFRF (inverted)", "Quality Score"]
-
     fig = go.Figure()
     for _, row in df.iterrows():
         fig.add_trace(go.Scatterpolar(
             r=[
-                row["Density"] / 0.95,
+                row["Density"] / 0.95,          # normalize to [0,1]
                 row["Tensile (MPa)"] / 8.5,
                 1 - row["EFRF"],
                 row["Quality Score"] / 100
@@ -673,7 +663,6 @@ def render_side_by_side_comparison(golden, all_solutions):
             fill='toself',
             name=row["Solution"]
         ))
-
     fig.update_layout(
         polar=dict(radialaxis=dict(visible=True, range=[0,1])),
         showlegend=True,
@@ -689,11 +678,11 @@ def render_best_solutions():
     st.info("✅ All formulations are normalized to sum to 100%")
     solutions, golden = generate_best_solutions_with_mass_balance()
     st.session_state.golden_solution = golden
+    st.session_state.best_solutions = solutions
 
     render_golden_solution(golden)
     render_side_by_side_comparison(golden, solutions)
 
-    # Full table
     df = pd.DataFrame(solutions)
     df_display = df.copy()
     for col in ['API (%)', 'Binder (%)', 'PVPP (%)', 'MCC (%)', 'Moisture (%)', 'Total (%)']:
@@ -703,10 +692,8 @@ def render_best_solutions():
     df_display['Tensile (MPa)'] = df_display['Tensile (MPa)'].round(2)
     df_display['EFRF'] = df_display['EFRF'].round(3)
     df_display['Quality Score'] = df_display['Quality Score'].round(1)
-
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-    # Download buttons
     csv = df.to_csv(index=False)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     col1, col2 = st.columns(2)
@@ -737,8 +724,18 @@ def render_best_solutions():
 def render_optimization_summary():
     st.markdown("---")
     st.markdown("## 📈 Optimization Summary")
-    col1, col2 = st.columns([2,1])
+
+    # Performance metrics cards
+    col1, col2 = st.columns(2)
     with col1:
+        st.metric("⏱️ Runtime", f"{st.session_state.runtime}s" if st.session_state.runtime else "—")
+    with col2:
+        evals_per_sec = (POPULATION_SIZE * NSGA_GENERATIONS) / max(1, st.session_state.runtime)
+        st.metric("⚡ Evaluations/Second", f"{evals_per_sec:.0f}")
+
+    col3, col4 = st.columns([2, 1])
+    with col3:
+        st.markdown("### Key Statistics")
         stats = pd.DataFrame({
             'Metric': [
                 'Total Solutions Evaluated',
@@ -747,7 +744,6 @@ def render_optimization_summary():
                 'Best Tensile',
                 'Best EFRF',
                 'Mass Balance',
-                'Evaluations/Second',
                 'Hardware'
             ],
             'Value': [
@@ -757,37 +753,46 @@ def render_optimization_summary():
                 f'{2.0 + 1.5 * np.random.random():.2f} MPa',
                 f'{0.15 + 0.20 * np.random.random():.3f}',
                 '✅ 100% (Enforced)',
-                f'{(POPULATION_SIZE * NSGA_GENERATIONS) / max(1, st.session_state.runtime):.1f}',
                 'CPU (Simulated)'
             ]
         })
         st.dataframe(stats, hide_index=True, use_container_width=True)
-    with col2:
+    with col4:
         st.markdown("### Status Indicators")
         st.success("✅ Algorithm: NSGA-II")
         st.success("✅ Model: Physics-Informed Neural Network")
         st.success("✅ Constraint: Mass Balance")
         st.info("📊 Pareto Front: Optimized")
         st.info("🎯 Objectives: 3")
-        st.info(f"⏱️ Runtime: {st.session_state.runtime}s" if st.session_state.runtime else "⏱️ Runtime: Pending")
 
 # ================================================================
-# MAIN APPLICATION
+# MAIN ORCHESTRATION
 # ================================================================
 def main():
+    """Main application entry point – orchestrates all dashboard components."""
+    
+    # 1. Sidebar (always visible)
     render_sidebar()
+    
+    # 2. Title and input panel
     st.markdown("# 🧬 Hybrid AI · Multi-Objective Tablet Optimization")
     st.markdown("#### Nile Valley University · Sudan · v29.28‑R32")
     st.markdown("---")
     render_input_panel()
+    
+    # 3. Binder grade impact (shown regardless of optimization state)
     render_binder_grade_comparison()
+    
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        run = st.button("🚀 Run Hybrid Optimization", type="primary", use_container_width=True)
-
-    if run:
-        start = time.time()
+        run_button = st.button("🚀 Run Hybrid Optimization", type="primary", use_container_width=True)
+    
+    # 4. Handle optimization execution
+    if run_button:
+        start_time = time.time()
+        
+        # Validate formulation
         valid, msg = validate_formulation(
             st.session_state.api, st.session_state.binder,
             st.session_state.pvpp, st.session_state.mgst,
@@ -796,23 +801,40 @@ def main():
         if not valid:
             st.error(f"❌ {msg}")
             return
+        
+        # Generate results (replace with actual optimizer call)
         st.session_state.optimization_complete = True
         st.session_state.results = generate_results()
+        
+        # Generate solutions (replace with actual NSGA-II output)
+        solutions, golden = generate_best_solutions_with_mass_balance()
+        st.session_state.golden_solution = golden
+        st.session_state.best_solutions = solutions
+        
+        # --- Render all results ---
         render_results_summary(st.session_state.results)
         render_training_progress()
         render_pareto_evolution()
-        render_best_solutions()
+        render_golden_solution(golden)
+        render_side_by_side_comparison(golden, solutions)
         render_optimization_summary()
-        st.session_state.runtime = round(time.time() - start, 1)
+        
+        # Runtime
+        st.session_state.runtime = round(time.time() - start_time, 1)
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
+        
     elif st.session_state.optimization_complete and st.session_state.results:
+        # Show cached results if already run
         render_results_summary(st.session_state.results)
         render_training_progress()
         render_pareto_evolution()
-        render_best_solutions()
+        render_golden_solution(st.session_state.golden_solution)
+        render_side_by_side_comparison(st.session_state.golden_solution, st.session_state.best_solutions)
         render_optimization_summary()
+    
     else:
+        # Initial state – no results yet
         st.info("👆 Adjust parameters and click 'Run Hybrid Optimization' to begin.")
         st.markdown("---")
         st.markdown("### 🎯 Key Features")
