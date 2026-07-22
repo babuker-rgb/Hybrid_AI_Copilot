@@ -515,6 +515,39 @@ def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
         for name in ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture']:
             st.caption(f"{name}: {summary[name]:.1f}%")
 
+def render_binder_grade_comparison():
+    """Show how binder grade affects key properties"""
+    st.markdown("### 🔬 Binder Grade Impact")
+    grades = pd.DataFrame([
+        {
+            "Grade": name,
+            "Compressibility": props["compressibility"],
+            "Disintegration": props["disintegration"],
+            "Flowability": props["flow"]
+        }
+        for name, props in BINDER_GRADES.items()
+    ])
+    
+    fig = go.Figure()
+    for col in ["Compressibility", "Disintegration", "Flowability"]:
+        fig.add_trace(go.Bar(
+            x=grades["Grade"],
+            y=grades[col],
+            name=col,
+            text=[f"{v:.0%}" for v in grades[col]],
+            textposition="outside"
+        ))
+    fig.update_layout(
+        barmode="group",
+        title="Binder Grade Properties",
+        yaxis=dict(tickformat=".0%", range=[0, 1]),
+        height=300,
+        margin=dict(l=0, r=0, t=40, b=0),
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
 def render_input_panel():
     st.markdown("## 🧪 Formulation Parameters")
     st.info("⚠️ **Note:** Formulation components will be automatically normalized to sum to 100% for mass balance.")
@@ -560,6 +593,9 @@ def render_input_panel():
         st.session_state.dwell_time = st.slider("**Dwell Time (ms)**", DWELL_TIME_MIN, DWELL_TIME_MAX, st.session_state.dwell_time, step=1.0)
         st.session_state.friction = st.slider("**Friction Coefficient**", FRICTION_MIN, FRICTION_MAX, st.session_state.friction, step=0.01)
         st.session_state.decompression_time = st.slider("**Decompression Time (ms)**", DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, step=2.0)
+    
+    # Add binder grade comparison chart
+    render_binder_grade_comparison()
 
 def render_results_summary(results):
     st.markdown("---")
@@ -888,7 +924,8 @@ def render_optimization_summary():
                 'Best Tensile',
                 'Best EFRF',
                 'Mass Balance',
-                'Evaluations/Second'
+                'Evaluations/Second',
+                'Hardware'
             ],
             'Value': [
                 f'{POPULATION_SIZE * NSGA_GENERATIONS:,}',
@@ -897,7 +934,8 @@ def render_optimization_summary():
                 f'{2.0 + 1.5 * np.random.random():.2f} MPa',
                 f'{0.15 + 0.20 * np.random.random():.3f}',
                 '✅ 100% (Enforced)',
-                f'{(POPULATION_SIZE * NSGA_GENERATIONS) / max(1, st.session_state.runtime):.1f}'
+                f'{(POPULATION_SIZE * NSGA_GENERATIONS) / max(1, st.session_state.runtime):.1f}',
+                'CPU (Simulated)'
             ]
         }
         df_stats = pd.DataFrame(stats_data)
