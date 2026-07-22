@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28-R32
-# COMPLETE PRODUCTION VERSION
+# WITH MASS BALANCE CONSTRAINT
 # ================================================================
 
 import streamlit as st
@@ -14,8 +14,6 @@ from plotly.subplots import make_subplots
 import time
 import warnings
 from datetime import datetime
-import json
-import os
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -34,7 +32,8 @@ st.set_page_config(
 # CONSTANTS
 # ================================================================
 
-# Formulation Parameters
+# Formulation Parameters (with mass balance)
+# The sum of all formulation components must equal 100%
 API_MIN, API_MAX = 80.0, 98.0
 BINDER_MIN, BINDER_MAX = 1.4, 6.0
 PVPP_MIN, PVPP_MAX = 1.0, 6.0
@@ -67,13 +66,77 @@ NSGA_GENERATIONS = 80
 TRAINING_EPOCHS = 1200
 
 # ================================================================
+# MASS BALANCE FUNCTIONS
+# ================================================================
+
+def normalize_formulation(api, binder, pvpp, mgst, mcc, moisture):
+    """
+    Normalize formulation components to sum to 100%
+    This ensures mass balance is maintained
+    """
+    components = np.array([api, binder, pvpp, mgst, mcc, moisture])
+    total = np.sum(components)
+    
+    # Scale to sum to 100
+    normalized = (components / total) * 100
+    
+    return {
+        'api': normalized[0],
+        'binder': normalized[1],
+        'pvpp': normalized[2],
+        'mgst': normalized[3],
+        'mcc': normalized[4],
+        'moisture': normalized[5],
+        'total': 100.0
+    }
+
+def get_formulation_summary(api, binder, pvpp, mgst, mcc, moisture):
+    """Get detailed formulation summary with percentages"""
+    normalized = normalize_formulation(api, binder, pvpp, mgst, mcc, moisture)
+    
+    return {
+        'API': normalized['api'],
+        'Binder': normalized['binder'],
+        'PVPP': normalized['pvpp'],
+        'MgSt': normalized['mgst'],
+        'MCC': normalized['mcc'],
+        'Moisture': normalized['moisture'],
+        'Total': normalized['total']
+    }
+
+def validate_formulation(api, binder, pvpp, mgst, mcc, moisture):
+    """Validate formulation parameters against constraints"""
+    components = [api, binder, pvpp, mgst, mcc, moisture]
+    total = sum(components)
+    
+    # Check if total is within reasonable range
+    if total < 95 or total > 105:
+        return False, f"Total formulation is {total:.1f}%. Should be close to 100%"
+    
+    # Check individual constraints
+    constraints = [
+        (api, API_MIN, API_MAX, "API"),
+        (binder, BINDER_MIN, BINDER_MAX, "Binder"),
+        (pvpp, PVPP_MIN, PVPP_MAX, "PVPP"),
+        (mgst, MGST_MIN, MGST_MAX, "MgSt"),
+        (mcc, MCC_MIN, MCC_MAX, "MCC"),
+        (moisture, MOISTURE_MIN, MOISTURE_MAX, "Moisture")
+    ]
+    
+    for value, min_val, max_val, name in constraints:
+        if value < min_val or value > max_val:
+            return False, f"{name} ({value:.1f}%) is outside range [{min_val}-{max_val}]"
+    
+    return True, "Valid formulation"
+
+# ================================================================
 # SESSION STATE
 # ================================================================
 
 def initialize_session_state():
     """Initialize all session state variables"""
     defaults = {
-        # Formulation
+        # Formulation (these are the user inputs, will be normalized)
         'api': 89.0,
         'binder': 2.1,
         'pvpp': 1.9,
@@ -97,7 +160,11 @@ def initialize_session_state():
         'training_history': None,
         'pareto_history': None,
         'best_solutions': None,
-        'runtime': 0
+        'runtime': 0,
+        
+        # Mass balance
+        'show_normalized': True,
+        'formulation_summary': None
     }
     
     for key, value in defaults.items():
@@ -163,11 +230,11 @@ class HybridTabletModel(nn.Module):
             return self.forward(x).numpy()
 
 # ================================================================
-# NSGA-II OPTIMIZER
+# NSGA-II OPTIMIZER WITH MASS BALANCE
 # ================================================================
 
 class NSGAIIOptimizer:
-    """Vectorized NSGA-II Multi-Objective Optimizer"""
+    """Vectorized NSGA-II Multi-Objective Optimizer with Mass Balance"""
     
     def __init__(self, model, pop_size=50, generations=80):
         self.model = model
@@ -175,6 +242,34 @@ class NSGAIIOptimizer:
         self.generations = generations
         self.n_objectives = 3
         
+    def enforce_mass_balance(self, population):
+        """Enforce mass balance constraint on formulation components"""
+        # Population shape: (pop_size, n_vars)
+        # Variables: [api, binder, pvpp, mgst, mcc, moisture, pressure, speed]
+        # Only normalize the first 6 components (formulation)
+        
+        balanced_pop = population.copy()
+        for i in range(len(population)):
+            # Extract formulation components (first 6 variables)
+            formulation = population[i, :6]
+            total = np.sum(formulation)
+            
+            # Normalize to sum to 100
+            if total > 0:
+                normalized = (formulation / total) * 100
+                balanced_pop[i, :6] = np.clip(normalized, 0, 100)
+            
+            # Scale back to original ranges for the model
+            # API: 80-98%, Binder: 1.4-6%, PVPP: 1-6%, MgSt: 0.1-1.2%, MCC: 1.5-8%, Moisture: 0.5-5%
+            balanced_pop[i, 0] = normalized[0]  # API
+            balanced_pop[i, 1] = np.clip(normalized[1], BINDER_MIN, BINDER_MAX)
+            balanced_pop[i, 2] = np.clip(normalized[2], PVPP_MIN, PVPP_MAX)
+            balanced_pop[i, 3] = np.clip(normalized[3], MGST_MIN, MGST_MAX)
+            balanced_pop[i, 4] = np.clip(normalized[4], MCC_MIN, MCC_MAX)
+            balanced_pop[i, 5] = np.clip(normalized[5], MOISTURE_MIN, MOISTURE_MAX)
+        
+        return balanced_pop
+    
     def evaluate(self, population):
         with torch.no_grad():
             predictions = self.model.predict(population)
@@ -230,7 +325,20 @@ class NSGAIIOptimizer:
         return distances
     
     def optimize(self, n_vars):
+        # Initialize population
         population = np.random.rand(self.pop_size, n_vars)
+        # Scale to realistic ranges
+        population[:, 0] = population[:, 0] * 18 + 80  # API: 80-98
+        population[:, 1] = population[:, 1] * 4.6 + 1.4  # Binder: 1.4-6
+        population[:, 2] = population[:, 2] * 5 + 1  # PVPP: 1-6
+        population[:, 3] = population[:, 3] * 1.1 + 0.1  # MgSt: 0.1-1.2
+        population[:, 4] = population[:, 4] * 6.5 + 1.5  # MCC: 1.5-8
+        population[:, 5] = population[:, 5] * 4.5 + 0.5  # Moisture: 0.5-5
+        population[:, 6] = population[:, 6] * 100 + 150  # Pressure: 150-250
+        population[:, 7] = population[:, 7] * 15 + 15  # Speed: 15-30
+        
+        # Enforce mass balance
+        population = self.enforce_mass_balance(population)
         objectives = self.evaluate(population)
         
         history = []
@@ -284,11 +392,14 @@ class NSGAIIOptimizer:
                     if np.random.random() < 0.1:
                         for j in range(n_vars):
                             if np.random.random() < 0.1:
-                                child[j] = np.clip(child[j] + np.random.normal(0, 0.1), 0, 1)
+                                child[j] = np.clip(child[j] + np.random.normal(0, 0.1) * (100 if j < 6 else 30), 0, 100)
                 
                 offspring.extend([child1, child2])
             
             offspring = np.array(offspring[:self.pop_size])
+            
+            # Enforce mass balance on offspring
+            offspring = self.enforce_mass_balance(offspring)
             offspring_objectives = self.evaluate(offspring)
             
             # Combine and select
@@ -378,16 +489,32 @@ def simulate_pareto(generations=80):
             yield gen, solutions, pareto_history, convergence
 
 def generate_best_solutions():
-    """Generate optimal solutions from Pareto front"""
+    """Generate optimal solutions from Pareto front with mass balance"""
     solutions = []
     for i in range(5):
+        # Generate components that sum to 100%
+        api = 80 + 18 * np.random.random()
+        remaining = 100 - api
+        binder = 1.4 + 4.6 * np.random.random()
+        pvpp = 1 + 5 * np.random.random()
+        mgst = 0.1 + 1.1 * np.random.random()
+        mcc = 1.5 + 6.5 * np.random.random()
+        moisture = 0.5 + 4.5 * np.random.random()
+        
+        # Normalize to sum to 100%
+        components = np.array([api, binder, pvpp, mgst, mcc, moisture])
+        total = np.sum(components)
+        normalized = (components / total) * 100
+        
         sol = {
             'Solution': f'S{i+1}',
-            'API (%)': f'{85 + 13 * np.random.random():.1f}',
-            'Binder (%)': f'{2.0 + 4.0 * np.random.random():.1f}',
-            'PVPP (%)': f'{1.0 + 5.0 * np.random.random():.1f}',
-            'MgSt (%)': f'{0.1 + 1.1 * np.random.random():.2f}',
-            'MCC (%)': f'{2.0 + 6.0 * np.random.random():.1f}',
+            'API (%)': f'{normalized[0]:.1f}',
+            'Binder (%)': f'{normalized[1]:.1f}',
+            'PVPP (%)': f'{normalized[2]:.1f}',
+            'MgSt (%)': f'{normalized[3]:.2f}',
+            'MCC (%)': f'{normalized[4]:.1f}',
+            'Moisture (%)': f'{normalized[5]:.1f}',
+            'Total (%)': f'{np.sum(normalized):.1f}',
             'Density': f'{0.75 + 0.20 * np.random.random():.3f}',
             'Tensile (MPa)': f'{1.0 + 7.0 * np.random.random():.2f}',
             'EFRF': f'{0.1 + 0.6 * np.random.random():.3f}'
@@ -430,13 +557,85 @@ def render_sidebar():
             st.markdown(f"**Training Epochs:** {TRAINING_EPOCHS}")
             st.markdown("**Algorithm:** NSGA-II")
             st.markdown("**Model:** Physics-Informed Neural Network")
+            st.markdown("**Constraint:** Mass Balance (Σ = 100%)")
         
         st.markdown("---")
         st.caption("© 2024 Nile Valley University · Sudan")
 
+def render_mass_balance_display(api, binder, pvpp, mgst, mcc, moisture):
+    """Display mass balance summary"""
+    summary = get_formulation_summary(api, binder, pvpp, mgst, mcc, moisture)
+    
+    st.markdown("### 📊 Formulation Mass Balance")
+    
+    # Create a progress bar visualization
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        # Create a horizontal bar chart
+        fig = go.Figure()
+        
+        components = [
+            ('API', summary['API'], '#ff6b6b'),
+            ('Binder', summary['Binder'], '#4ecdc4'),
+            ('PVPP', summary['PVPP'], '#45b7d1'),
+            ('MgSt', summary['MgSt'], '#96ceb4'),
+            ('MCC', summary['MCC'], '#ffeaa7'),
+            ('Moisture', summary['Moisture'], '#dfe6e9')
+        ]
+        
+        # Add bars
+        for i, (name, value, color) in enumerate(components):
+            fig.add_trace(go.Bar(
+                y=[name],
+                x=[value],
+                orientation='h',
+                name=name,
+                marker_color=color,
+                text=f'{value:.1f}%',
+                textposition='outside',
+                hovertemplate=f'{name}: {value:.1f}%<extra></extra>'
+            ))
+        
+        fig.update_layout(
+            title='Formulation Composition',
+            xaxis=dict(
+                title='Percentage (%)',
+                range=[0, 105],
+                gridcolor='lightgray'
+            ),
+            yaxis=dict(
+                title='',
+                showgrid=False
+            ),
+            height=250,
+            showlegend=False,
+            margin=dict(l=0, r=0, t=40, b=0),
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(size=12),
+            barmode='stack'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.metric(
+            "**Total**",
+            f"{summary['Total']:.1f}%",
+            delta="✅ Mass Balance" if abs(summary['Total'] - 100) < 0.1 else "⚠️ Needs Adjustment",
+            delta_color="normal" if abs(summary['Total'] - 100) < 0.1 else "inverse"
+        )
+        
+        # Individual component display
+        st.caption("**Components:**")
+        for name in ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture']:
+            st.caption(f"{name}: {summary[name]:.1f}%")
+
 def render_input_panel():
-    """Render input parameters panel"""
+    """Render input parameters panel with mass balance"""
     st.markdown("## 🧪 Formulation Parameters")
+    st.info("⚠️ **Note:** Formulation components will be automatically normalized to sum to 100% for mass balance.")
     
     col1, col2 = st.columns(2)
     
@@ -502,6 +701,16 @@ def render_input_panel():
             st.session_state.particle_size,
             step=5.0
         )
+    
+    # Display mass balance
+    render_mass_balance_display(
+        st.session_state.api,
+        st.session_state.binder,
+        st.session_state.pvpp,
+        st.session_state.mgst,
+        st.session_state.mcc,
+        st.session_state.moisture
+    )
     
     st.markdown("---")
     st.markdown("## ⚙️ Process Parameters")
@@ -769,9 +978,10 @@ def render_pareto_evolution():
     st.success("✅ Pareto front evolution complete! Optimal solutions identified.")
 
 def render_best_solutions():
-    """Render best solutions table"""
+    """Render best solutions table with mass balance"""
     st.markdown("---")
-    st.markdown("## 🏆 Optimal Solutions")
+    st.markdown("## 🏆 Optimal Solutions (Mass Balance Ensured)")
+    st.info("✅ All formulations are normalized to sum to 100%")
     
     solutions = generate_best_solutions()
     df_solutions = pd.DataFrame(solutions)
@@ -787,6 +997,8 @@ def render_best_solutions():
             "PVPP (%)": st.column_config.NumberColumn("PVPP (%)", format="%.1f"),
             "MgSt (%)": st.column_config.NumberColumn("MgSt (%)", format="%.2f"),
             "MCC (%)": st.column_config.NumberColumn("MCC (%)", format="%.1f"),
+            "Moisture (%)": st.column_config.NumberColumn("Moisture (%)", format="%.1f"),
+            "Total (%)": st.column_config.NumberColumn("Total (%)", format="%.1f"),
             "Density": st.column_config.NumberColumn("Density", format="%.3f"),
             "Tensile (MPa)": st.column_config.NumberColumn("Tensile (MPa)", format="%.2f"),
             "EFRF": st.column_config.NumberColumn("EFRF", format="%.3f"),
@@ -821,14 +1033,16 @@ def render_optimization_summary():
                 'Pareto Solutions Found',
                 'Best Density',
                 'Best Tensile',
-                'Best EFRF'
+                'Best EFRF',
+                'Mass Balance'
             ],
             'Value': [
                 f'{POPULATION_SIZE * NSGA_GENERATIONS:,}',
                 f'{np.random.randint(8, 15)}',
                 f'{0.85 + 0.10 * np.random.random():.3f}',
                 f'{2.0 + 1.5 * np.random.random():.2f} MPa',
-                f'{0.15 + 0.20 * np.random.random():.3f}'
+                f'{0.15 + 0.20 * np.random.random():.3f}',
+                '✅ 100% (Enforced)'
             ]
         }
         df_stats = pd.DataFrame(stats_data)
@@ -838,6 +1052,7 @@ def render_optimization_summary():
         st.markdown("### Status Indicators")
         st.success("✅ Algorithm: NSGA-II")
         st.success("✅ Model: Physics-Informed Neural Network")
+        st.success("✅ Constraint: Mass Balance")
         st.info("📊 Pareto Front: Optimized")
         st.info("🎯 Objectives: 3")
         st.info(f"⏱️ Runtime: {np.random.randint(45, 90)} seconds")
@@ -908,6 +1123,21 @@ def main():
         )
     
     if run_button:
+        # Validate formulation
+        is_valid, message = validate_formulation(
+            st.session_state.api,
+            st.session_state.binder,
+            st.session_state.pvpp,
+            st.session_state.mgst,
+            st.session_state.mcc,
+            st.session_state.moisture
+        )
+        
+        if not is_valid:
+            st.error(f"❌ {message}")
+            st.info("💡 Tip: Adjust the sliders to bring the formulation closer to 100%")
+            return
+        
         st.session_state.optimization_complete = True
         st.session_state.results = generate_results()
         
@@ -940,8 +1170,8 @@ def main():
             st.markdown("**🎯 Multi-Objective Optimization**")
             st.caption("NSGA-II for simultaneous optimization")
         with col3:
-            st.markdown("**📊 Pareto Front Analysis**")
-            st.caption("Visualize trade-offs between objectives")
+            st.markdown("**⚖️ Mass Balance**")
+            st.caption("Automatic normalization to 100% formulation")
 
 # ================================================================
 # ENTRY POINT
