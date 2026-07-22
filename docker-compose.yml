@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  hybrid-ai:
+    build: .
+    container_name: hybrid-ai-optimization
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./results:/app/results
+      - ./models:/app/models
+      - ./logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - APP_VERSION=v29.28-R32
+    restart: unless-stopped
+    command: streamlit run app_integration.py --server.port=8501 --server.address=0.0.0.0
