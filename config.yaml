@@ -1,0 +1,109 @@
+# ================================================================
+# Hybrid AI Tablet Optimization - Configuration File
+# Nile Valley University · Sudan · v29.28-R32
+# ================================================================
+
+model:
+  architecture: "HybridTabletModel"
+  input_dim: 8
+  hidden_dim: 256
+  output_dim: 5
+  dropout_rate: 0.2
+  activation: "relu"
+  
+training:
+  epochs: 1200
+  batch_size: 64
+  learning_rate: 0.001
+  optimizer: "adam"
+  loss_function: "hybrid_loss"
+  early_stopping_patience: 50
+  validation_split: 0.2
+  
+optimization:
+  algorithm: "nsga2"
+  population_size: 50
+  generations: 80
+  crossover_probability: 0.8
+  mutation_probability: 0.1
+  objectives:
+    - name: "maximize_density"
+      weight: 0.33
+    - name: "maximize_tensile"
+      weight: 0.33
+    - name: "minimize_efrf"
+      weight: 0.34
+      
+physics_constraints:
+  density:
+    min: 0.55
+    max: 0.95
+  tensile:
+    min: 0.5
+    max: 8.5
+  efrf:
+    min: 0.0
+    max: 1.0
+  disintegration:
+    min: 2.0
+    max: 47.0
+  dissolution:
+    min: 10.0
+    max: 90.0
+
+formulation_limits:
+  api:
+    min: 80.0
+    max: 98.0
+  binder:
+    min: 1.4
+    max: 6.0
+  pvpp:
+    min: 1.0
+    max: 6.0
+  mgst:
+    min: 0.10
+    max: 1.2
+  mcc:
+    min: 1.5
+    max: 8.0
+  moisture:
+    min: 0.5
+    max: 5.0
+    
+process_parameters:
+  pressure:
+    min: 150.0
+    max: 250.0
+  speed:
+    min: 15.0
+    max: 30.0
+  dwell_time:
+    min: 5.0
+    max: 50.0
+  friction:
+    min: 0.1
+    max: 0.5
+  decompression_time:
+    min: 10.0
+    max: 80.0
+  particle_size:
+    min: 10.0
+    max: 200.0
+  granule:
+    min: 30.0
+    max: 250.0
+
+binder_grades:
+  - "MCC PH101"
+  - "MCC PH102"
+  - "MCC PH200"
+  - "MCC KG"
+  - "Lactose"
+  - "Dicalcium Phosphate"
+  
+output:
+  save_results: true
+  visualization_format: "plotly"
+  report_format: "pdf"
+  results_directory: "./results"
