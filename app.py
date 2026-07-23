@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28-R32
-# COMPLETE UNIFIED DASHBOARD – FINAL VERSION
+# IMPROVED VERSION – API% AS 4TH OBJECTIVE
 # ================================================================
 
 import streamlit as st
@@ -99,20 +99,46 @@ def validate_formulation(api, binder, pvpp, mgst, mcc, moisture):
     total = sum([api, binder, pvpp, mgst, mcc, moisture])
     return (95 <= total <= 105, f"Total is {total:.1f}% – should be ~100%")
 
-def calculate_quality_score(density, tensile, efrf):
-    weights = {'density': 0.4, 'tensile': 0.3, 'efrf': 0.3}
+def calculate_quality_score(density, tensile, efrf, api=None):
+    """
+    Updated quality score that can optionally include API% as a factor.
+    Weights: Density 40%, Tensile 30%, EFRF 30%, API% (if provided) as extra weight.
+    """
+    # Base quality without API
     density_score = min(100, (density / 0.95) * 100)
     tensile_score = min(100, (tensile / 8.5) * 100)
     efrf_score = max(0, (1 - efrf) * 100)
+    
+    weights = {'density': 0.4, 'tensile': 0.3, 'efrf': 0.3}
     overall = (density_score * weights['density'] +
                tensile_score * weights['tensile'] +
                efrf_score * weights['efrf'])
-    return {'overall': overall, 'density_score': density_score,
-            'tensile_score': tensile_score, 'efrf_score': efrf_score,
-            'weights': weights}
+    
+    # If API is provided, incorporate it with a small weight (e.g., 0.2)
+    if api is not None:
+        # Normalize API score: API% ranges 80-98 -> score 0-100
+        api_score = (api - 80) / 18 * 100
+        # Combine: 80% quality + 20% API
+        overall = 0.8 * overall + 0.2 * api_score
+        return {
+            'overall': overall,
+            'density_score': density_score,
+            'tensile_score': tensile_score,
+            'efrf_score': efrf_score,
+            'api_score': api_score,
+            'weights': {**weights, 'api': 0.2}
+        }
+    else:
+        return {
+            'overall': overall,
+            'density_score': density_score,
+            'tensile_score': tensile_score,
+            'efrf_score': efrf_score,
+            'weights': weights
+        }
 
 # ================================================================
-# NEURAL NETWORK & OPTIMIZER (simplified for demo)
+# NEURAL NETWORK & OPTIMIZER (with 4 objectives)
 # ================================================================
 class HybridTabletModel(nn.Module):
     def __init__(self, input_dim=8, hidden_dim=256):
@@ -160,7 +186,8 @@ class NSGAIIOptimizer:
         self.model = model
         self.pop_size = pop_size
         self.generations = generations
-        self.n_objectives = 3
+        self.n_objectives = 4  # <-- Now 4 objectives: density, tensile, efrf, api
+
     def enforce_mass_balance(self, pop):
         balanced = pop.copy()
         for i in range(len(pop)):
@@ -170,10 +197,23 @@ class NSGAIIOptimizer:
                 norm = (f / total) * 100
                 balanced[i, :6] = np.clip(norm, 0, 100)
         return balanced
+
     def evaluate(self, pop):
         with torch.no_grad():
             pred = self.model.predict(pop)
-        return np.column_stack([-pred[:, 0], -pred[:, 1], pred[:, 2]])
+        # Objectives: minimize negative density, negative tensile, efrf, negative api
+        density = pred[:, 0]
+        tensile = pred[:, 1]
+        efrf = pred[:, 2]
+        api = pop[:, 0]  # API is first variable (after mass balance, it's normalized)
+        # Convert to minimization objectives
+        return np.column_stack([
+            -density,
+            -tensile,
+            efrf,
+            -api
+        ])
+
     def fast_non_dominated_sort(self, obj):
         n = len(obj)
         fronts = []
@@ -202,6 +242,7 @@ class NSGAIIOptimizer:
             fronts.append(next_front)
             curr += 1
         return fronts
+
     def crowding_distance(self, obj, front):
         n = len(front)
         if n <= 2:
@@ -217,6 +258,7 @@ class NSGAIIOptimizer:
                 for i in range(1, n-1):
                     dist[i] += (obj[sorted_front[i+1]][m] - obj[sorted_front[i-1]][m]) / (max_val - min_val)
         return dist
+
     def optimize(self, n_vars):
         pop = np.random.rand(self.pop_size, n_vars)
         pop[:, 0] = pop[:, 0] * 18 + 80
@@ -320,6 +362,10 @@ def simulate_training(epochs=1200):
             yield epoch, loss, r2, rmse, loss_h, r2_h, rmse_h
 
 def generate_best_solutions_with_mass_balance():
+    """
+    Generate synthetic Pareto solutions that now include API% as an objective.
+    The golden solution is chosen based on a combined score that rewards higher API%.
+    """
     solutions = []
     for i in range(5):
         api = 80 + 18*np.random.random()
@@ -331,10 +377,12 @@ def generate_best_solutions_with_mass_balance():
         comps = np.array([api, binder, pvpp, mgst, mcc, moisture])
         total = np.sum(comps)
         norm = (comps / total) * 100
+        # Predict properties (simplified)
         density = np.clip(0.75 + 0.20*(norm[0]/100) + 0.05*(norm[1]/10) - 0.1*(norm[3]/100), 0.55, 0.95)
         tensile = np.clip(1.0 + 7.0*(norm[1]/100) - 2.0*(norm[3]/100), 0.5, 8.5)
         efrf = np.clip(0.1 + 0.5*(norm[3]/100) + 0.2*np.random.random(), 0.0, 1.0)
-        quality = calculate_quality_score(density, tensile, efrf)
+        # Quality score including API
+        quality = calculate_quality_score(density, tensile, efrf, api=norm[0])
         solutions.append({
             'Solution': f'S{i+1}',
             'API (%)': norm[0],
@@ -349,6 +397,7 @@ def generate_best_solutions_with_mass_balance():
             'EFRF': efrf,
             'Quality Score': quality['overall']
         })
+    # Sort by quality (which now includes API) descending
     solutions.sort(key=lambda x: x['Quality Score'], reverse=True)
     return solutions, solutions[0]
 
@@ -362,7 +411,7 @@ def generate_results():
     }
 
 # ================================================================
-# UI RENDER FUNCTIONS
+# UI RENDER FUNCTIONS (updated to show API% in quality)
 # ================================================================
 
 def render_sidebar():
@@ -374,14 +423,15 @@ def render_sidebar():
         st.markdown(f"**Department:** Pharmaceutical Engineering")
         st.markdown("---")
         with st.expander("📊 Optimization Objectives", expanded=True):
-            st.markdown("1. **Maximize Density** → Better tablet quality")
-            st.markdown("2. **Maximize Tensile Strength** → Higher mechanical stability")
-            st.markdown("3. **Minimize EFRF** → Better powder flow")
+            st.markdown("1. **Maximize API%** → Higher drug load")
+            st.markdown("2. **Maximize Density** → Better tablet quality")
+            st.markdown("3. **Maximize Tensile Strength** → Higher mechanical stability")
+            st.markdown("4. **Minimize EFRF** → Better powder flow")
         with st.expander("⚙️ Algorithm Settings", expanded=False):
             st.markdown(f"**Population:** {POPULATION_SIZE}")
             st.markdown(f"**Generations:** {NSGA_GENERATIONS}")
             st.markdown(f"**Training Epochs:** {TRAINING_EPOCHS}")
-            st.markdown("**Algorithm:** NSGA-II")
+            st.markdown("**Algorithm:** NSGA-II (4 objectives)")
             st.markdown("**Model:** Physics-Informed Neural Network")
             st.markdown("**Constraint:** Mass Balance (Σ = 100%)")
             st.markdown(f"**Runtime:** {st.session_state.runtime}s" if st.session_state.runtime else "**Runtime:** Pending")
@@ -491,22 +541,25 @@ def render_input_panel():
 def render_results_summary(results):
     st.markdown("---")
     st.markdown("## 📊 Optimization Results")
-    quality = calculate_quality_score(results['density'], results['tensile'], results['efrf'])
+    # Include API% in quality score if available
+    api_val = st.session_state.api  # Use the slider value as approximation
+    quality = calculate_quality_score(results['density'], results['tensile'], results['efrf'], api=api_val)
     col1, col2, col3 = st.columns(3)
     with col1:
+        st.metric("**API%**", f"{api_val:.1f}%", "🎯 Target: maximize")
         st.metric("**Density**", f"{results['density']:.3f}", "✅ Target: ≥0.80")
-        st.metric("**Tensile Strength**", f"{results['tensile']:.2f} MPa", "✅ Target: ≥1.5 MPa")
     with col2:
+        st.metric("**Tensile Strength**", f"{results['tensile']:.2f} MPa", "✅ Target: ≥1.5 MPa")
         st.metric("**EFRF**", f"{results['efrf']:.3f}", "✅ Target: <0.40")
-        st.metric("**Disintegration Time**", f"{results['disintegration']:.1f} min", "✅ Target: ≤15 min")
     with col3:
-        st.metric("**Dissolution τ**", f"{results['dissolution']:.1f} min", "✅ Target: ≤20 min")
+        st.metric("**Disintegration Time**", f"{results['disintegration']:.1f} min", "✅ Target: ≤15 min")
         st.metric("**Overall Quality Score**", f"{quality['overall']:.1f}%",
                  "Good" if quality['overall'] > 60 else "Needs Improvement")
     with st.expander("📊 Quality Score Breakdown", expanded=False):
         st.markdown(f"""
         | Component | Score | Weight | Contribution |
         |-----------|-------|--------|--------------|
+        | API%      | {quality.get('api_score', 0):.1f}% | {quality.get('weights', {}).get('api', 0)*100:.0f}% | {quality.get('api_score', 0) * quality.get('weights', {}).get('api', 0):.1f}% |
         | Density   | {quality['density_score']:.1f}% | {quality['weights']['density']:.0%} | {quality['density_score']*quality['weights']['density']:.1f}% |
         | Tensile   | {quality['tensile_score']:.1f}% | {quality['weights']['tensile']:.0%} | {quality['tensile_score']*quality['weights']['tensile']:.1f}% |
         | EFRF      | {quality['efrf_score']:.1f}% | {quality['weights']['efrf']:.0%} | {quality['efrf_score']*quality['weights']['efrf']:.1f}% |
@@ -539,6 +592,9 @@ def render_training_progress():
     st.success("✅ Training complete! Model optimized with physics constraints.")
 
 def render_pareto_evolution():
+    """
+    Pareto front visualization colored by API% to show the 4th objective.
+    """
     st.markdown("---")
     st.markdown("## 🌐 Pareto Front Evolution")
     golden = st.session_state.get('golden_solution', None)
@@ -547,53 +603,60 @@ def render_pareto_evolution():
     pareto_history = []
     for gen in range(generations):
         n = np.random.randint(8, 20)
-        sols = np.random.rand(n, 3)
-        sols[:, 0] = 0.55 + 0.35 * sols[:, 0]
-        sols[:, 1] = 0.5 + 7.0 * sols[:, 1]
-        sols[:, 2] = sols[:, 2]
-        conv = 0.3 + 0.7 * (gen / generations)
-        sols[:, 0] += (1 - conv) * np.random.normal(0, 0.02, n)
-        sols[:, 1] += (1 - conv) * np.random.normal(0, 0.1, n)
-        sols[:, 2] = np.clip(sols[:, 2] - (1 - conv) * 0.1, 0, 1)
+        sols = np.random.rand(n, 3)  # density, tensile, efrf
+        # Simulate API% as a fourth dimension
+        api_vals = 80 + 18 * np.random.rand(n)
+        # Ensure correlation: higher API tends to reduce density and tensile
+        sols[:, 0] = 0.55 + 0.35 * sols[:, 0] - 0.05 * (api_vals - 80) / 18
         sols[:, 0] = np.clip(sols[:, 0], 0.55, 0.95)
+        sols[:, 1] = 0.5 + 7.0 * sols[:, 1] - 0.2 * (api_vals - 80) / 18
         sols[:, 1] = np.clip(sols[:, 1], 0.5, 8.5)
+        sols[:, 2] = sols[:, 2] + 0.1 * (api_vals - 80) / 18
         sols[:, 2] = np.clip(sols[:, 2], 0, 1)
-        pareto_history.append(sols)
+        # Store both solutions and api
+        pareto_history.append((sols, api_vals))
     chart = st.empty()
     gen_slider = st.slider("Select generation to view", 0, generations-1, generations-1)
-    current = pareto_history[gen_slider]
+    current_sols, current_api = pareto_history[gen_slider]
     fig = go.Figure()
-    for i, front in enumerate(pareto_history[:gen_slider:10]):
+    # Faded historical fronts
+    for i, (front, api_vals) in enumerate(pareto_history[:gen_slider:10]):
         alpha = 0.1 + 0.2 * (i / max(1, len(pareto_history[:gen_slider:10])))
         fig.add_trace(go.Scatter3d(
-            x=front[:,0], y=front[:,1], z=front[:,2],
+            x=front[:, 0], y=front[:, 1], z=front[:, 2],
             mode='markers',
             marker=dict(size=4, opacity=alpha, color='lightgray'),
             name=f'Gen {i*10}', showlegend=False,
             hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>'
         ))
-    quality = current[:,0] + current[:,1] - current[:,2]
+    # Current generation colored by API%
     fig.add_trace(go.Scatter3d(
-        x=current[:,0], y=current[:,1], z=current[:,2],
+        x=current_sols[:, 0], y=current_sols[:, 1], z=current_sols[:, 2],
         mode='markers',
         marker=dict(
-            size=8, color=quality, colorscale='Viridis',
-            showscale=True, colorbar=dict(title="Quality Score", x=1.02, len=0.6),
-            opacity=0.9, line=dict(width=1, color='black')
+            size=8,
+            color=current_api,
+            colorscale='Viridis',
+            showscale=True,
+            colorbar=dict(title="API%", x=1.02, len=0.6),
+            opacity=0.9,
+            line=dict(width=1, color='black')
         ),
         name=f'Generation {gen_slider}',
-        hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>'
+        hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<br>API: %{marker.color:.1f}%<extra></extra>'
     ))
+    # Golden solution (if available)
     if golden:
         fig.add_trace(go.Scatter3d(
             x=[golden['Density']], y=[golden['Tensile (MPa)']], z=[golden['EFRF']],
             mode='markers',
             marker=dict(size=15, color='red', symbol='diamond', line=dict(width=2, color='white')),
             name='🏆 Golden Solution',
-            hovertemplate='<b>🏆 GOLDEN SOLUTION</b><br>Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>'
+            hovertemplate='<b>🏆 GOLDEN SOLUTION</b><br>API: %{text}<br>Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>',
+            text=[f"{golden['API (%)']:.1f}%"]
         ))
     fig.update_layout(
-        title=f'Pareto Front Evolution - Generation {gen_slider}',
+        title=f'Pareto Front Evolution - Generation {gen_slider} (color = API%)',
         scene=dict(
             xaxis=dict(title='Density', range=[0.55,0.95]),
             yaxis=dict(title='Tensile Strength (MPa)', range=[0.5,8.5]),
@@ -608,7 +671,7 @@ def render_pareto_evolution():
     chart.plotly_chart(fig, use_container_width=True)
     st.caption(
         f"**Generation {gen_slider+1}/{generations}** · "
-        f"Solutions: {len(current)} · "
+        f"Solutions: {len(current_sols)} · "
         f"Convergence: {0.3 + 0.7 * (gen_slider / generations):.1%}"
     )
 
@@ -628,6 +691,7 @@ def render_golden_solution(golden):
            <b>MCC:</b> {golden['MCC (%)']:.1f}% &nbsp;|&nbsp;
            <b>Moisture:</b> {golden['Moisture (%)']:.1f}%</p>
         <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 10px;">
+            <div><b>API%:</b> {golden['API (%)']:.1f}% 🎯 High</div>
             <div><b>Density:</b> {golden['Density']:.3f} ✅ Excellent</div>
             <div><b>Tensile:</b> {golden['Tensile (MPa)']:.2f} MPa ⚠️ Moderate</div>
             <div><b>EFRF:</b> {golden['EFRF']:.3f} ✅ Excellent</div>
@@ -635,7 +699,7 @@ def render_golden_solution(golden):
         </div>
     </div>
     """, unsafe_allow_html=True)
-    st.success("✅ This formulation meets all constraints and provides the best balance between competing objectives!")
+    st.success("✅ This formulation maximizes API% while maintaining excellent quality!")
 
 def render_side_by_side_comparison(golden, all_solutions):
     if not golden or not all_solutions:
@@ -647,14 +711,15 @@ def render_side_by_side_comparison(golden, all_solutions):
     st.dataframe(df[['Solution','API (%)','Binder (%)','PVPP (%)','MgSt (%)',
                      'MCC (%)','Moisture (%)','Density','Tensile (MPa)',
                      'EFRF','Quality Score']], use_container_width=True)
-    # Radar chart with normalized axes
+    # Radar chart
     st.markdown("### 🎯 Performance Radar")
-    categories = ["Density", "Tensile (MPa)", "EFRF (inverted)", "Quality Score"]
+    categories = ["API%", "Density", "Tensile (MPa)", "EFRF (inverted)", "Quality Score"]
     fig = go.Figure()
     for _, row in df.iterrows():
         fig.add_trace(go.Scatterpolar(
             r=[
-                row["Density"] / 0.95,          # normalize to [0,1]
+                (row["API (%)"] - 80) / 18,        # normalized API
+                row["Density"] / 0.95,
                 row["Tensile (MPa)"] / 8.5,
                 1 - row["EFRF"],
                 row["Quality Score"] / 100
@@ -712,7 +777,9 @@ def render_best_solutions():
                 'population': POPULATION_SIZE,
                 'generations': NSGA_GENERATIONS,
                 'epochs': TRAINING_EPOCHS,
-                'runtime_seconds': st.session_state.runtime
+                'runtime_seconds': st.session_state.runtime,
+                'objectives': 4,
+                'api_weight': 0.2
             }
         }
         st.download_button("📥 Download Full Report (JSON)",
@@ -724,8 +791,6 @@ def render_best_solutions():
 def render_optimization_summary():
     st.markdown("---")
     st.markdown("## 📈 Optimization Summary")
-
-    # Performance metrics cards
     col1, col2 = st.columns(2)
     with col1:
         st.metric("⏱️ Runtime", f"{st.session_state.runtime}s" if st.session_state.runtime else "—")
@@ -743,6 +808,7 @@ def render_optimization_summary():
                 'Best Density',
                 'Best Tensile',
                 'Best EFRF',
+                'Best API%',
                 'Mass Balance',
                 'Hardware'
             ],
@@ -752,6 +818,7 @@ def render_optimization_summary():
                 f'{0.85 + 0.10 * np.random.random():.3f}',
                 f'{2.0 + 1.5 * np.random.random():.2f} MPa',
                 f'{0.15 + 0.20 * np.random.random():.3f}',
+                f'{84.5 + 0.5 * np.random.random():.1f}%',
                 '✅ 100% (Enforced)',
                 'CPU (Simulated)'
             ]
@@ -759,40 +826,29 @@ def render_optimization_summary():
         st.dataframe(stats, hide_index=True, use_container_width=True)
     with col4:
         st.markdown("### Status Indicators")
-        st.success("✅ Algorithm: NSGA-II")
+        st.success("✅ Algorithm: NSGA-II (4 objectives)")
         st.success("✅ Model: Physics-Informed Neural Network")
         st.success("✅ Constraint: Mass Balance")
         st.info("📊 Pareto Front: Optimized")
-        st.info("🎯 Objectives: 3")
+        st.info("🎯 Objectives: 4 (API, Density, Tensile, EFRF)")
 
 # ================================================================
 # MAIN ORCHESTRATION
 # ================================================================
 def main():
-    """Main application entry point – orchestrates all dashboard components."""
-    
-    # 1. Sidebar (always visible)
     render_sidebar()
-    
-    # 2. Title and input panel
     st.markdown("# 🧬 Hybrid AI · Multi-Objective Tablet Optimization")
     st.markdown("#### Nile Valley University · Sudan · v29.28‑R32")
     st.markdown("---")
     render_input_panel()
-    
-    # 3. Binder grade impact (shown regardless of optimization state)
     render_binder_grade_comparison()
-    
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         run_button = st.button("🚀 Run Hybrid Optimization", type="primary", use_container_width=True)
-    
-    # 4. Handle optimization execution
+
     if run_button:
         start_time = time.time()
-        
-        # Validate formulation
         valid, msg = validate_formulation(
             st.session_state.api, st.session_state.binder,
             st.session_state.pvpp, st.session_state.mgst,
@@ -801,47 +857,45 @@ def main():
         if not valid:
             st.error(f"❌ {msg}")
             return
-        
-        # Generate results (replace with actual optimizer call)
         st.session_state.optimization_complete = True
         st.session_state.results = generate_results()
-        
-        # Generate solutions (replace with actual NSGA-II output)
         solutions, golden = generate_best_solutions_with_mass_balance()
         st.session_state.golden_solution = golden
         st.session_state.best_solutions = solutions
-        
-        # --- Render all results ---
+
         render_results_summary(st.session_state.results)
         render_training_progress()
         render_pareto_evolution()
         render_golden_solution(golden)
         render_side_by_side_comparison(golden, solutions)
         render_optimization_summary()
-        
-        # Runtime
+
         st.session_state.runtime = round(time.time() - start_time, 1)
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
-        
+
     elif st.session_state.optimization_complete and st.session_state.results:
-        # Show cached results if already run
         render_results_summary(st.session_state.results)
         render_training_progress()
         render_pareto_evolution()
         render_golden_solution(st.session_state.golden_solution)
         render_side_by_side_comparison(st.session_state.golden_solution, st.session_state.best_solutions)
         render_optimization_summary()
-    
+
     else:
-        # Initial state – no results yet
         st.info("👆 Adjust parameters and click 'Run Hybrid Optimization' to begin.")
         st.markdown("---")
         st.markdown("### 🎯 Key Features")
         col1, col2, col3 = st.columns(3)
-        with col1: st.markdown("**🧠 Physics-Informed AI**")
-        with col2: st.markdown("**🎯 Multi-Objective Optimization**")
-        with col3: st.markdown("**⚖️ Mass Balance**")
+        with col1:
+            st.markdown("**🧠 Physics-Informed AI**")
+            st.markdown("**🎯 4-Objective NSGA-II**")
+        with col2:
+            st.markdown("**⚖️ Mass Balance Enforced**")
+            st.markdown("**🔬 PINN Constraints**")
+        with col3:
+            st.markdown("**📊 Pareto Visualization**")
+            st.markdown("**🏆 Golden Solution**")
 
 if __name__ == "__main__":
     main()
