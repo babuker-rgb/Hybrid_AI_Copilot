@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# IMPROVED FOR HIGHER API% (WITH QUALITY PRESERVATION)
+# FINAL VERSION – MINOR IMPROVEMENT FOR HIGHER API% WITH BEST QUALITY
 # ================================================================
 
 import streamlit as st
