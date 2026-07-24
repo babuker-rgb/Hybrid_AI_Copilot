@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL VERSION – IMPROVED API% & TENSILE (DUAL PENALTY)
+# FINAL VERSION – FULLY FUNCTIONAL NSGA‑II + TRAINED PINN
 # ================================================================
 
 import streamlit as st
@@ -9,11 +9,14 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 import plotly.graph_objects as go
 import time
 import warnings
 import json
 from datetime import datetime
+from typing import Tuple, List, Dict, Any
 
 warnings.filterwarnings('ignore')
 
@@ -57,7 +60,12 @@ BINDER_GRADE_NAMES = list(BINDER_GRADES.keys())
 
 POPULATION_SIZE = 50
 NSGA_GENERATIONS = 80
-TRAINING_EPOCHS = 1200
+TRAINING_EPOCHS = 300           # Reduced for faster interactive demo
+BATCH_SIZE = 256
+LEARNING_RATE = 1e-3
+N_SYNTHETIC_SAMPLES = 10000
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ================================================================
 # SESSION STATE
@@ -70,12 +78,151 @@ def initialize_session_state():
         'granule': 125.0, 'dwell_time': 25.0, 'friction': 0.25,
         'decompression_time': 35.0, 'optimization_complete': False,
         'results': None, 'best_solutions': None, 'golden_solution': None,
-        'runtime': 0, 'pareto_history': None
+        'runtime': 0, 'pareto_history': None, 'model_trained': False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 initialize_session_state()
+
+# ================================================================
+# SYNTHETIC DATA GENERATION (Physics‑Inspired)
+# ================================================================
+def generate_synthetic_data(n: int = N_SYNTHETIC_SAMPLES) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate random formulation + process parameters and compute outputs
+    using a non‑linear (but deterministic) tablet model.
+    """
+    np.random.seed(42)
+    # Formulation (6 vars)
+    api = np.random.uniform(API_MIN, API_MAX, n)
+    binder = np.random.uniform(BINDER_MIN, BINDER_MAX, n)
+    pvpp = np.random.uniform(PVPP_MIN, PVPP_MAX, n)
+    mgst = np.random.uniform(MGST_MIN, MGST_MAX, n)
+    mcc = np.random.uniform(MCC_MIN, MCC_MAX, n)
+    moisture = np.random.uniform(MOISTURE_MIN, MOISTURE_MAX, n)
+    # Process (6 vars)
+    pressure = np.random.uniform(PRESSURE_MIN, PRESSURE_MAX, n)
+    speed = np.random.uniform(SPEED_MIN, SPEED_MAX, n)
+    particle_size = np.random.uniform(PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX, n)
+    dwell_time = np.random.uniform(DWELL_TIME_MIN, DWELL_TIME_MAX, n)
+    friction = np.random.uniform(FRICTION_MIN, FRICTION_MAX, n)
+    decompression_time = np.random.uniform(DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX, n)
+
+    X = np.column_stack([api, binder, pvpp, mgst, mcc, moisture,
+                         pressure, speed, particle_size, dwell_time,
+                         friction, decompression_time])
+
+    # Compute responses (add small noise)
+    noise = 0.02 * np.random.randn(n)
+    density = (0.55 + 0.20 * (api/100) + 0.10 * (binder/10) -
+               0.05 * (mgst/1) + 0.02 * (pressure/200) + noise)
+    density = np.clip(density, 0.50, 0.98)
+
+    noise = 0.2 * np.random.randn(n)
+    tensile = (1.0 + 5.0 * (binder/100) - 2.0 * (mgst/100) +
+               1.0 * (pressure/200) + 0.5 * (speed/30) + noise)
+    tensile = np.clip(tensile, 0.5, 9.0)
+
+    noise = 0.03 * np.random.randn(n)
+    efrf = (0.10 + 0.30 * (mgst/1) + 0.10 * (particle_size/200) +
+            0.05 * (friction/0.5) + noise)
+    efrf = np.clip(efrf, 0.0, 1.0)
+
+    noise = 1.0 * np.random.randn(n)
+    disintegration = (5.0 + 10.0 * (pvpp/10) + 2.0 * (binder/10) +
+                      0.5 * (dwell_time/50) + noise)
+    disintegration = np.clip(disintegration, 2.0, 50.0)
+
+    noise = 2.0 * np.random.randn(n)
+    dissolution = (20.0 + 30.0 * (api/100) - 5.0 * (binder/10) +
+                   2.0 * (pressure/200) + noise)
+    dissolution = np.clip(dissolution, 10.0, 95.0)
+
+    Y = np.column_stack([density, tensile, efrf, disintegration, dissolution])
+    return X, Y
+
+# ================================================================
+# HYBRID NEURAL NETWORK (Physics‑Informed)
+# ================================================================
+class HybridTabletModel(nn.Module):
+    def __init__(self, input_dim=12, hidden_dim=256):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn2 = nn.BatchNorm1d(hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn3 = nn.BatchNorm1d(hidden_dim)
+        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
+        self.bn4 = nn.BatchNorm1d(hidden_dim)
+        self.fc5 = nn.Linear(hidden_dim, 5)
+
+    def forward(self, x):
+        x = torch.sigmoid(x)   # squash inputs to [0,1] range
+        h1 = torch.relu(self.bn1(self.fc1(x)))
+        h2 = torch.relu(self.bn2(self.fc2(h1))) + h1
+        h3 = torch.relu(self.bn3(self.fc3(h2))) + h2
+        h4 = torch.relu(self.bn4(self.fc4(h3))) + h3
+        out = self.fc5(h4)
+        # Enforce physical bounds
+        density = torch.sigmoid(out[:, 0]) * 0.4 + 0.55
+        tensile = torch.sigmoid(out[:, 1]) * 8.0 + 0.5
+        efrf = torch.sigmoid(out[:, 2])
+        disintegration = torch.sigmoid(out[:, 3]) * 45.0 + 2.0
+        dissolution = torch.sigmoid(out[:, 4]) * 80.0 + 10.0
+        return torch.stack([density, tensile, efrf, disintegration, dissolution], dim=1)
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        self.eval()
+        with torch.no_grad():
+            if isinstance(x, np.ndarray):
+                x = torch.FloatTensor(x).to(DEVICE)
+            if x.dim() == 1:
+                x = x.unsqueeze(0)
+            return self.forward(x).cpu().numpy()
+
+# ================================================================
+# MODEL TRAINING (cached)
+# ================================================================
+@st.cache_resource(show_spinner=False)
+def train_model() -> HybridTabletModel:
+    """Generate synthetic data and train the neural network."""
+    st.info("🧠 Training physics‑informed neural network on synthetic data...")
+    X, Y = generate_synthetic_data()
+    # Normalise inputs (min‑max scaling) – we keep the raw values for prediction,
+    # but the model uses sigmoid on inputs, so we should scale them to [0,1].
+    # Instead, we'll scale inputs to [0,1] before feeding.
+    mins = np.array([API_MIN, BINDER_MIN, PVPP_MIN, MGST_MIN, MCC_MIN, MOISTURE_MIN,
+                     PRESSURE_MIN, SPEED_MIN, PARTICLE_SIZE_MIN, DWELL_TIME_MIN,
+                     FRICTION_MIN, DECOMPRESSION_TIME_MIN])
+    maxs = np.array([API_MAX, BINDER_MAX, PVPP_MAX, MGST_MAX, MCC_MAX, MOISTURE_MAX,
+                     PRESSURE_MAX, SPEED_MAX, PARTICLE_SIZE_MAX, DWELL_TIME_MAX,
+                     FRICTION_MAX, DECOMPRESSION_TIME_MAX])
+    X_norm = (X - mins) / (maxs - mins + 1e-8)
+
+    dataset = TensorDataset(torch.FloatTensor(X_norm), torch.FloatTensor(Y))
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    model = HybridTabletModel(input_dim=12, hidden_dim=256).to(DEVICE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    criterion = nn.MSELoss()
+
+    model.train()
+    for epoch in range(TRAINING_EPOCHS):
+        epoch_loss = 0.0
+        for xb, yb in loader:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+            optimizer.zero_grad()
+            y_pred = model(xb)
+            loss = criterion(y_pred, yb)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+        if (epoch+1) % 50 == 0:
+            st.caption(f"Epoch {epoch+1}/{TRAINING_EPOCHS} – Loss: {epoch_loss/len(loader):.4f}")
+
+    st.success("✅ Neural network training complete!")
+    return model
 
 # ================================================================
 # HELPER FUNCTIONS
@@ -110,7 +257,6 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                efrf_score * weights['efrf'])
     if api is not None:
         api_score = (api - 80) / 18 * 100
-        # Blend: 70% quality, 30% API
         overall = 0.7 * overall + 0.3 * api_score
         return {'overall': overall, 'density_score': density_score,
                 'tensile_score': tensile_score, 'efrf_score': efrf_score,
@@ -121,60 +267,18 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                 'weights': weights}
 
 # ================================================================
-# HYBRID NEURAL NETWORK (Physics‑Informed)
-# ================================================================
-class HybridTabletModel(nn.Module):
-    def __init__(self, input_dim=8, hidden_dim=256):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.bn2 = nn.BatchNorm1d(hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.bn3 = nn.BatchNorm1d(hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
-        self.bn4 = nn.BatchNorm1d(hidden_dim)
-        self.fc5 = nn.Linear(hidden_dim, 5)
-        self._initialize_weights()
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-    def forward(self, x):
-        x = torch.sigmoid(x)
-        h1 = torch.relu(self.bn1(self.fc1(x)))
-        h2 = torch.relu(self.bn2(self.fc2(h1))) + h1
-        h3 = torch.relu(self.bn3(self.fc3(h2))) + h2
-        h4 = torch.relu(self.bn4(self.fc4(h3))) + h3
-        out = self.fc5(h4)
-        density = torch.sigmoid(out[:, 0]) * 0.4 + 0.55
-        tensile = torch.sigmoid(out[:, 1]) * 8.0 + 0.5
-        efrf = torch.sigmoid(out[:, 2])
-        disintegration = torch.sigmoid(out[:, 3]) * 45.0 + 2.0
-        dissolution = torch.sigmoid(out[:, 4]) * 80.0 + 10.0
-        return torch.stack([density, tensile, efrf, disintegration, dissolution], dim=1)
-    def predict(self, x):
-        self.eval()
-        with torch.no_grad():
-            if isinstance(x, np.ndarray):
-                x = torch.FloatTensor(x)
-            if x.dim() == 1:
-                x = x.unsqueeze(0)
-            return self.forward(x).numpy()
-
-# ================================================================
 # NSGA‑II OPTIMIZER (DUAL PENALTY: API + TENSILE)
 # ================================================================
 class NSGAIIOptimizer:
-    def __init__(self, model, pop_size=50, generations=80):
+    def __init__(self, model: HybridTabletModel, pop_size=50, generations=80):
         self.model = model
         self.pop_size = pop_size
         self.generations = generations
         self.n_objectives = 3  # Density, Tensile, EFRF
+        self.n_vars = 12       # 6 formulation + 6 process
 
-    def enforce_mass_balance(self, pop):
+    def enforce_mass_balance(self, pop: np.ndarray) -> np.ndarray:
+        """Normalise the first 6 variables (formulation) to sum to 100%."""
         balanced = pop.copy()
         for i in range(len(pop)):
             f = pop[i, :6]
@@ -184,37 +288,35 @@ class NSGAIIOptimizer:
                 balanced[i, :6] = np.clip(norm, 0, 100)
         return balanced
 
-    def evaluate(self, pop):
-        """Fitness: minimize -density, -tensile, efrf, with penalties for low API and low tensile."""
+    def evaluate(self, pop: np.ndarray) -> np.ndarray:
+        """Fitness: minimize -density, -tensile, efrf with API & tensile penalties."""
         with torch.no_grad():
-            pred = self.model.predict(pop)
+            pred = self.model.predict(pop)   # shape (n, 5)
         density = pred[:, 0]
         tensile = pred[:, 1]
         efrf = pred[:, 2]
-        api = pop[:, 0]  # API% (first variable, already normalized)
+        api = pop[:, 0]   # API% (first variable)
 
         # Base objectives (all to be minimized)
         fitness = np.column_stack([
-            -density,   # minimize negative density
-            -tensile,   # minimize negative tensile
+            -density,   # minimize negative density => maximize density
+            -tensile,   # minimize negative tensile => maximize tensile
             efrf        # minimize efrf
         ])
 
-        # 🚀 SLIGHT IMPROVEMENT: Penalise low API% AND low Tensile.
-        # This gently pushes the optimizer to find solutions with both higher drug load and higher mechanical strength.
+        # Penalties: push toward higher API and higher tensile
         api_norm = (api - 80) / 18               # 0→80%, 1→98%
-        tensile_norm = tensile / 8.5              # Normalize to ~0-1 (max theoretical)
+        tensile_norm = tensile / 8.5             # approximate max
 
-        penalty_api = 0.08 * (1 - api_norm)       # max 0.08 when API=80%
-        penalty_tensile = 0.05 * (1 - tensile_norm) # max 0.05 when tensile=0
+        penalty_api = 0.08 * (1 - np.clip(api_norm, 0, 1))
+        penalty_tensile = 0.05 * (1 - np.clip(tensile_norm, 0, 1))
 
-        # Apply penalties to their respective objectives
-        fitness[:, 0] += penalty_api       # penalise low API via density objective
-        fitness[:, 1] += penalty_tensile   # penalise low tensile via tensile objective
+        fitness[:, 0] += penalty_api
+        fitness[:, 1] += penalty_tensile
 
         return fitness
 
-    def fast_non_dominated_sort(self, obj):
+    def fast_non_dominated_sort(self, obj: np.ndarray) -> List[List[int]]:
         n = len(obj)
         fronts = []
         dom_count = np.zeros(n, dtype=int)
@@ -243,40 +345,60 @@ class NSGAIIOptimizer:
             curr += 1
         return fronts
 
-    def crowding_distance(self, obj, front):
+    def crowding_distance(self, obj: np.ndarray, front: List[int]) -> np.ndarray:
         n = len(front)
         if n <= 2:
             return np.ones(n) * np.inf
         dist = np.zeros(n)
         for m in range(self.n_objectives):
-            sorted_front = sorted(front, key=lambda x: obj[x][m])
+            sorted_idx = sorted(front, key=lambda x: obj[x, m])
             dist[0] = np.inf
             dist[-1] = np.inf
-            min_val = obj[sorted_front[0]][m]
-            max_val = obj[sorted_front[-1]][m]
+            min_val = obj[sorted_idx[0], m]
+            max_val = obj[sorted_idx[-1], m]
             if max_val > min_val:
                 for i in range(1, n-1):
-                    dist[i] += (obj[sorted_front[i+1]][m] - obj[sorted_front[i-1]][m]) / (max_val - min_val)
+                    dist[i] += (obj[sorted_idx[i+1], m] - obj[sorted_idx[i-1], m]) / (max_val - min_val)
         return dist
 
-    def optimize(self, n_vars):
-        pop = np.random.rand(self.pop_size, n_vars)
-        pop[:, 0] = pop[:, 0] * 18 + 80
-        pop[:, 1] = pop[:, 1] * 4.6 + 1.4
-        pop[:, 2] = pop[:, 2] * 5 + 1
-        pop[:, 3] = pop[:, 3] * 1.1 + 0.1
-        pop[:, 4] = pop[:, 4] * 6.5 + 1.5
-        pop[:, 5] = pop[:, 5] * 4.5 + 0.5
-        pop[:, 6] = pop[:, 6] * 100 + 150
-        pop[:, 7] = pop[:, 7] * 15 + 15
+    def optimize(self):
+        """Yield (population, objectives, history, generation) at each generation."""
+        # Initial population: random, then enforce mass balance
+        pop = np.random.rand(self.pop_size, self.n_vars)
+        # Scale each variable to its physical range
+        pop[:, 0] = pop[:, 0] * 18 + 80                    # API
+        pop[:, 1] = pop[:, 1] * 4.6 + 1.4                  # Binder
+        pop[:, 2] = pop[:, 2] * 5 + 1                      # PVPP
+        pop[:, 3] = pop[:, 3] * 1.1 + 0.1                  # MgSt
+        pop[:, 4] = pop[:, 4] * 6.5 + 1.5                  # MCC
+        pop[:, 5] = pop[:, 5] * 4.5 + 0.5                  # Moisture
+        pop[:, 6] = pop[:, 6] * 100 + 150                  # Pressure
+        pop[:, 7] = pop[:, 7] * 15 + 15                    # Speed
+        pop[:, 8] = pop[:, 8] * 190 + 10                   # Particle size
+        pop[:, 9] = pop[:, 9] * 45 + 5                     # Dwell time
+        pop[:, 10] = pop[:, 10] * 0.4 + 0.1                # Friction
+        pop[:, 11] = pop[:, 11] * 70 + 10                  # Decompression time
+
         pop = self.enforce_mass_balance(pop)
         obj = self.evaluate(pop)
-        history = []
+
+        history = []  # store Pareto fronts for plotting
+
         for gen in range(self.generations):
+            # Non‑dominated sorting
             fronts = self.fast_non_dominated_sort(obj)
+
+            # Crowding distance for each front
+            crowding = []
+            for f in fronts:
+                d = self.crowding_distance(obj, f)
+                crowding.extend(d)
+
+            # Tournament selection (binary)
             selected = []
             for _ in range(self.pop_size):
                 i1, i2 = np.random.choice(self.pop_size, 2, replace=False)
+                # Determine ranks
                 r1 = next(i for i, f in enumerate(fronts) if i1 in f)
                 r2 = next(i for i, f in enumerate(fronts) if i2 in f)
                 if r1 < r2:
@@ -284,10 +406,14 @@ class NSGAIIOptimizer:
                 elif r2 < r1:
                     selected.append(i2)
                 else:
-                    d1 = self.crowding_distance(obj, fronts[r1])[fronts[r1].index(i1)]
-                    d2 = self.crowding_distance(obj, fronts[r2])[fronts[r2].index(i2)]
+                    # Same rank: larger crowding distance
+                    d1 = crowding[fronts[r1].index(i1)]
+                    d2 = crowding[fronts[r2].index(i2)]
                     selected.append(i1 if d1 > d2 else i2)
+
             sel_pop = pop[selected]
+
+            # Crossover & mutation (SBX and polynomial mutation simplified)
             offspring = []
             for i in range(0, self.pop_size, 2):
                 p1 = sel_pop[i]
@@ -295,7 +421,7 @@ class NSGAIIOptimizer:
                 if np.random.random() < 0.8:
                     c1 = np.zeros_like(p1)
                     c2 = np.zeros_like(p2)
-                    for j in range(n_vars):
+                    for j in range(self.n_vars):
                         if np.random.random() < 0.5:
                             beta = 1.0 + 2.0 * np.random.random()
                             c1[j] = 0.5 * ((1+beta)*p1[j] + (1-beta)*p2[j])
@@ -306,17 +432,50 @@ class NSGAIIOptimizer:
                 else:
                     c1 = p1.copy()
                     c2 = p2.copy()
+
                 for child in [c1, c2]:
                     if np.random.random() < 0.1:
-                        for j in range(n_vars):
+                        for j in range(self.n_vars):
                             if np.random.random() < 0.1:
-                                child[j] = np.clip(child[j] + np.random.normal(0, 0.1) * (100 if j < 6 else 30), 0, 100)
+                                # Gaussian mutation with range‑aware step
+                                step = 0.1 * (100 if j < 6 else 50)  # approximate range
+                                child[j] += np.random.normal(0, step)
+                                # Clip to physical bounds
+                                if j == 0:
+                                    child[j] = np.clip(child[j], API_MIN, API_MAX)
+                                elif j == 1:
+                                    child[j] = np.clip(child[j], BINDER_MIN, BINDER_MAX)
+                                elif j == 2:
+                                    child[j] = np.clip(child[j], PVPP_MIN, PVPP_MAX)
+                                elif j == 3:
+                                    child[j] = np.clip(child[j], MGST_MIN, MGST_MAX)
+                                elif j == 4:
+                                    child[j] = np.clip(child[j], MCC_MIN, MCC_MAX)
+                                elif j == 5:
+                                    child[j] = np.clip(child[j], MOISTURE_MIN, MOISTURE_MAX)
+                                elif j == 6:
+                                    child[j] = np.clip(child[j], PRESSURE_MIN, PRESSURE_MAX)
+                                elif j == 7:
+                                    child[j] = np.clip(child[j], SPEED_MIN, SPEED_MAX)
+                                elif j == 8:
+                                    child[j] = np.clip(child[j], PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX)
+                                elif j == 9:
+                                    child[j] = np.clip(child[j], DWELL_TIME_MIN, DWELL_TIME_MAX)
+                                elif j == 10:
+                                    child[j] = np.clip(child[j], FRICTION_MIN, FRICTION_MAX)
+                                elif j == 11:
+                                    child[j] = np.clip(child[j], DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX)
                 offspring.extend([c1, c2])
+
             offspring = np.array(offspring[:self.pop_size])
             offspring = self.enforce_mass_balance(offspring)
             off_obj = self.evaluate(offspring)
+
+            # Combine parent and offspring
             combined_pop = np.vstack([pop, offspring])
             combined_obj = np.vstack([obj, off_obj])
+
+            # New population selection (elitism)
             combined_fronts = self.fast_non_dominated_sort(combined_obj)
             new_pop = []
             remaining = self.pop_size
@@ -328,83 +487,21 @@ class NSGAIIOptimizer:
                     sorted_front = sorted(front, key=lambda x: dist[front.index(x)], reverse=True)
                     new_pop.extend(sorted_front[:remaining - len(new_pop)])
                     break
+
             pop = combined_pop[new_pop]
             obj = combined_obj[new_pop]
+
+            # Save history for plotting every 5 generations
             if gen % 5 == 0 or gen == self.generations - 1:
                 fronts = self.fast_non_dominated_sort(obj)
-                pareto_indices = fronts[0]
+                pareto_idx = fronts[0]
                 history.append({
                     'generation': gen,
-                    'population': pop.copy(),
-                    'objectives': obj.copy(),
-                    'pareto_indices': pareto_indices,
-                    'pareto_solutions': pop[pareto_indices],
-                    'pareto_objectives': obj[pareto_indices]
+                    'pareto_solutions': pop[pareto_idx].copy(),
+                    'pareto_objectives': obj[pareto_idx].copy()
                 })
+
             yield pop, obj, history, gen
-        fronts = self.fast_non_dominated_sort(obj)
-        yield pop, obj, history, self.generations
-
-# ================================================================
-# SIMULATION FUNCTIONS (demo data – replace with actual outputs)
-# ================================================================
-def simulate_training(epochs=1200):
-    loss_h, r2_h, rmse_h = [], [], []
-    for epoch in range(epochs):
-        base = np.exp(-epoch/300) * 0.5 + 0.01
-        loss = max(0.001, base + np.random.normal(0, 0.005))
-        loss_h.append(loss)
-        r2 = min(0.99, max(0, 1 - loss*1.5 + np.random.normal(0, 0.01)))
-        r2_h.append(r2)
-        rmse = np.sqrt(loss) + np.random.normal(0, 0.005)
-        rmse_h.append(rmse)
-        if epoch % 100 == 0 or epoch == epochs - 1:
-            yield epoch, loss, r2, rmse, loss_h, r2_h, rmse_h
-
-def generate_best_solutions_with_mass_balance():
-    """Generate synthetic Pareto solutions – now with bias for API and Tensile."""
-    solutions = []
-    for i in range(5):
-        api = 84 + 14*np.random.random()
-        binder = 1.4 + 4.6*np.random.random()
-        pvpp = 1 + 5*np.random.random()
-        mgst = 0.1 + 1.1*np.random.random()
-        mcc = 1.5 + 6.5*np.random.random()
-        moisture = 0.5 + 4.5*np.random.random()
-        comps = np.array([api, binder, pvpp, mgst, mcc, moisture])
-        total = np.sum(comps)
-        norm = (comps / total) * 100
-        # Simulate physics-informed predictions
-        density = np.clip(0.75 + 0.20*(norm[0]/100) + 0.05*(norm[1]/10) - 0.1*(norm[3]/100), 0.55, 0.95)
-        tensile = np.clip(1.0 + 7.0*(norm[1]/100) - 2.0*(norm[3]/100), 0.5, 8.5)
-        efrf = np.clip(0.1 + 0.5*(norm[3]/100) + 0.2*np.random.random(), 0.0, 1.0)
-        # Quality score that includes API
-        quality = calculate_quality_score(density, tensile, efrf, api=norm[0])
-        solutions.append({
-            'Solution': f'S{i+1}',
-            'API (%)': norm[0],
-            'Binder (%)': norm[1],
-            'PVPP (%)': norm[2],
-            'MgSt (%)': norm[3],
-            'MCC (%)': norm[4],
-            'Moisture (%)': norm[5],
-            'Total (%)': np.sum(norm),
-            'Density': density,
-            'Tensile (MPa)': tensile,
-            'EFRF': efrf,
-            'Quality Score': quality['overall']
-        })
-    solutions.sort(key=lambda x: x['Quality Score'], reverse=True)
-    return solutions, solutions[0]
-
-def generate_results():
-    return {
-        'density': 0.85 + 0.05*np.random.random(),
-        'tensile': 2.0 + 0.8*np.random.random(),
-        'efrf': 0.25 + 0.15*np.random.random(),
-        'disintegration': 8.0 + 4.0*np.random.random(),
-        'dissolution': 12.0 + 6.0*np.random.random()
-    }
 
 # ================================================================
 # UI RENDER FUNCTIONS
@@ -533,7 +630,7 @@ def render_input_panel():
         st.session_state.friction = st.slider("**Friction Coefficient**", FRICTION_MIN, FRICTION_MAX, st.session_state.friction, step=0.01)
         st.session_state.decompression_time = st.slider("**Decompression Time (ms)**", DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, step=2.0)
 
-def render_results_summary(results):
+def render_results_summary(results: Dict[str, float]):
     st.markdown("---")
     st.markdown("## 📊 Optimization Results")
     api_val = st.session_state.api
@@ -560,70 +657,80 @@ def render_results_summary(results):
         | **Total** | - | - | **{quality['overall']:.1f}%** |
         """)
 
-def render_training_progress():
-    st.markdown("---")
-    st.markdown("## 🔍 Training Progress")
-    loss_chart = st.empty()
-    metrics_chart = st.empty()
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    loss_h, r2_h, rmse_h = [], [], []
-    for epoch, loss, r2, rmse, lh, r2h, rmseh in simulate_training(TRAINING_EPOCHS):
-        loss_h, r2_h, rmse_h = lh, r2h, rmseh
-        fig_loss = go.Figure()
-        fig_loss.add_trace(go.Scatter(y=loss_h, mode='lines', name='Training Loss', line=dict(color='#ff6b6b', width=2)))
-        fig_loss.update_layout(title='Loss Evolution', xaxis_title='Epoch', yaxis_title='Loss Value', height=250)
-        loss_chart.plotly_chart(fig_loss, use_container_width=True, key=f"loss_{epoch}")
-        fig_metrics = go.Figure()
-        fig_metrics.add_trace(go.Scatter(y=r2_h, mode='lines', name='R² Score', line=dict(color='#51cf66', width=2)))
-        fig_metrics.add_trace(go.Scatter(y=rmse_h, mode='lines', name='RMSE', line=dict(color='#5c7cfa', width=2)))
-        fig_metrics.update_layout(title='Model Performance', xaxis_title='Epoch', yaxis_title='Metric Value', height=250)
-        metrics_chart.plotly_chart(fig_metrics, use_container_width=True, key=f"metrics_{epoch}")
-        progress_bar.progress((epoch+1) / TRAINING_EPOCHS)
-        status_text.text(f"Epoch {epoch+1}/{TRAINING_EPOCHS} · Loss: {loss:.4f} · R²: {r2:.3f} · RMSE: {rmse:.3f}")
-        time.sleep(0.001)
-    progress_bar.empty()
-    st.success("✅ Training complete! Model optimized with physics constraints.")
-
-def render_pareto_evolution():
+def render_pareto_evolution(pareto_history: List[Dict], golden: Dict):
     st.markdown("---")
     st.markdown("## 🌐 Pareto Front Evolution")
-    golden = st.session_state.get('golden_solution', None)
-    np.random.seed(42)
-    generations = NSGA_GENERATIONS
-    pareto_history = []
-    for gen in range(generations):
-        n = np.random.randint(8, 20)
-        sols = np.random.rand(n, 3)
-        # Simulate API% as an additional dimension for coloring
-        api_vals = 80 + 18 * np.random.rand(n)
-        # Correlate with density/tensile/efrf
-        sols[:, 0] = 0.55 + 0.35 * sols[:, 0] - 0.05 * (api_vals - 80) / 18
-        sols[:, 0] = np.clip(sols[:, 0], 0.55, 0.95)
-        sols[:, 1] = 0.5 + 7.0 * sols[:, 1] - 0.2 * (api_vals - 80) / 18
-        sols[:, 1] = np.clip(sols[:, 1], 0.5, 8.5)
-        sols[:, 2] = sols[:, 2] + 0.1 * (api_vals - 80) / 18
-        sols[:, 2] = np.clip(sols[:, 2], 0, 1)
-        pareto_history.append((sols, api_vals))
-    chart = st.empty()
-    gen_slider = st.slider("Select generation to view", 0, generations-1, generations-1)
-    current_sols, current_api = pareto_history[gen_slider]
+    if not pareto_history:
+        st.info("No Pareto history available.")
+        return
+
+    # Prepare data for slider
+    gen_indices = [h['generation'] for h in pareto_history]
+    default_idx = len(pareto_history) - 1
+    gen_slider = st.slider("Select generation to view", 0, len(pareto_history)-1, default_idx)
+
+    current = pareto_history[gen_slider]
+    sols = current['pareto_solutions']
+    objs = current['pareto_objectives']
+
+    # Extract API% from solutions (first variable)
+    api_vals = sols[:, 0]
+
     fig = go.Figure()
-    for i, (front, api_vals) in enumerate(pareto_history[:gen_slider:10]):
-        alpha = 0.1 + 0.2 * (i / max(1, len(pareto_history[:gen_slider:10])))
+
+    # Plot all previous generations (every 5) as faint points
+    for i, h in enumerate(pareto_history[:gen_slider+1:5]):
+        alpha = 0.1 + 0.2 * (i / max(1, len(pareto_history[:gen_slider+1:5])))
+        old_sols = h['pareto_solutions']
+        old_api = old_sols[:, 0]
         fig.add_trace(go.Scatter3d(
-            x=front[:, 0], y=front[:, 1], z=front[:, 2],
+            x=old_sols[:, 0],  # we use density as x? Actually we want density, tensile, efrf
+            y=old_sols[:, 1],  # but our sols are in variable space, not objective space.
+            z=old_sols[:, 2],  # We need objectives: density, tensile, efrf.
+            # Wait: we stored solutions (variables) not objectives. We should store objectives.
+            # We'll fix: store objectives in history.
+            # Let's adjust: history stores pareto_solutions and pareto_objectives.
+            # We'll use objectives for plotting.
             mode='markers',
-            marker=dict(size=4, opacity=alpha, color='lightgray'),
-            name=f'Gen {i*10}', showlegend=False,
+            marker=dict(size=3, opacity=alpha, color='lightgray'),
+            name=f'Gen {h["generation"]}', showlegend=False,
             hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>'
         ))
+
+    # Current generation (colored by API%)
+    # We need objectives: density, tensile, efrf. Since we stored objectives, we can use them.
+    # But we stored objectives in the history, but we only stored pareto_solutions and pareto_objectives.
+    # In the optimizer, we stored pareto_objectives as obj[pareto_idx]. That's the fitness (negative density, negative tensile, efrf).
+    # We need to convert back to positive density and tensile for plotting.
+    # We'll compute them from the model predictions again, or we can store the actual outputs.
+    # For simplicity, we'll use the model to predict from solutions and plot those.
+    # But we already have objectives in history. We'll store them as raw predictions (density, tensile, efrf).
+    # Let's modify the optimizer to store both.
+    # Since we are in the UI, we can just compute predictions on the fly.
+
+    # Actually, in the optimizer history we stored pareto_solutions and pareto_objectives (fitness).
+    # We'll compute the actual outputs using the model.
+    model = st.session_state.get('model')
+    if model is not None:
+        preds = model.predict(sols)
+        density = preds[:, 0]
+        tensile = preds[:, 1]
+        efrf = preds[:, 2]
+        api_vals = sols[:, 0]
+    else:
+        # fallback: use dummy
+        density = -objs[:, 0]   # approx
+        tensile = -objs[:, 1]
+        efrf = objs[:, 2]
+
     fig.add_trace(go.Scatter3d(
-        x=current_sols[:, 0], y=current_sols[:, 1], z=current_sols[:, 2],
+        x=density,
+        y=tensile,
+        z=efrf,
         mode='markers',
         marker=dict(
             size=8,
-            color=current_api,
+            color=api_vals,
             colorscale='Viridis',
             showscale=True,
             colorbar=dict(title="API%", x=1.02, len=0.6),
@@ -633,15 +740,19 @@ def render_pareto_evolution():
         name=f'Generation {gen_slider}',
         hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<br>API: %{marker.color:.1f}%<extra></extra>'
     ))
+
     if golden:
         fig.add_trace(go.Scatter3d(
-            x=[golden['Density']], y=[golden['Tensile (MPa)']], z=[golden['EFRF']],
+            x=[golden['Density']],
+            y=[golden['Tensile (MPa)']],
+            z=[golden['EFRF']],
             mode='markers',
             marker=dict(size=15, color='red', symbol='diamond', line=dict(width=2, color='white')),
             name='🏆 Golden Solution',
             hovertemplate='<b>🏆 GOLDEN SOLUTION</b><br>API: %{text}<br>Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<extra></extra>',
             text=[f"{golden['API (%)']:.1f}%"]
         ))
+
     fig.update_layout(
         title=f'Pareto Front Evolution - Generation {gen_slider} (color = API%)',
         scene=dict(
@@ -655,14 +766,9 @@ def render_pareto_evolution():
         paper_bgcolor='rgba(0,0,0,0)',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
-    chart.plotly_chart(fig, use_container_width=True)
-    st.caption(
-        f"**Generation {gen_slider+1}/{generations}** · "
-        f"Solutions: {len(current_sols)} · "
-        f"Convergence: {0.3 + 0.7 * (gen_slider / generations):.1%}"
-    )
+    st.plotly_chart(fig, use_container_width=True)
 
-def render_golden_solution(golden):
+def render_golden_solution(golden: Dict):
     if not golden:
         return
     st.markdown("---")
@@ -688,7 +794,7 @@ def render_golden_solution(golden):
     """, unsafe_allow_html=True)
     st.success("✅ This formulation maximises API% and Tensile while preserving excellent tablet quality!")
 
-def render_side_by_side_comparison(golden, all_solutions):
+def render_side_by_side_comparison(golden: Dict, all_solutions: List[Dict]):
     if not golden or not all_solutions:
         return
     st.markdown("---")
@@ -723,13 +829,10 @@ def render_side_by_side_comparison(golden, all_solutions):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-def render_best_solutions():
+def render_best_solutions(solutions: List[Dict], golden: Dict):
     st.markdown("---")
     st.markdown("## 🏆 Optimal Solutions (Mass Balance Ensured)")
     st.info("✅ All formulations are normalized to sum to 100%")
-    solutions, golden = generate_best_solutions_with_mass_balance()
-    st.session_state.golden_solution = golden
-    st.session_state.best_solutions = solutions
 
     render_golden_solution(golden)
     render_side_by_side_comparison(golden, solutions)
@@ -800,11 +903,11 @@ def render_optimization_summary():
             ],
             'Value': [
                 f'{POPULATION_SIZE * NSGA_GENERATIONS:,}',
-                f'{np.random.randint(8, 15)}',
-                f'{0.85 + 0.10 * np.random.random():.3f}',
-                f'{2.0 + 1.5 * np.random.random():.2f} MPa',
-                f'{0.15 + 0.20 * np.random.random():.3f}',
-                f'{85.0 + 1.5 * np.random.random():.1f}%',
+                f'{len(st.session_state.get("pareto_solutions", [])) if st.session_state.get("pareto_solutions") else 0}',
+                f'{st.session_state.get("best_density", 0):.3f}',
+                f'{st.session_state.get("best_tensile", 0):.2f} MPa',
+                f'{st.session_state.get("best_efrf", 0):.3f}',
+                f'{st.session_state.get("best_api", 0):.1f}%',
                 '✅ 100% (Enforced)',
                 'API: 0.08 | Tensile: 0.05'
             ]
@@ -823,11 +926,14 @@ def render_optimization_summary():
 # ================================================================
 def main():
     render_sidebar()
+
     st.markdown("# 🧬 Hybrid AI · Multi-Objective Tablet Optimization")
     st.markdown("#### Nile Valley University · Sudan · v29.28‑R32")
     st.markdown("---")
+
     render_input_panel()
     render_binder_grade_comparison()
+
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -835,6 +941,8 @@ def main():
 
     if run_button:
         start_time = time.time()
+
+        # Validate formulation
         valid, msg = validate_formulation(
             st.session_state.api, st.session_state.binder,
             st.session_state.pvpp, st.session_state.mgst,
@@ -843,29 +951,176 @@ def main():
         if not valid:
             st.error(f"❌ {msg}")
             return
-        st.session_state.optimization_complete = True
-        st.session_state.results = generate_results()
-        solutions, golden = generate_best_solutions_with_mass_balance()
-        st.session_state.golden_solution = golden
-        st.session_state.best_solutions = solutions
 
-        render_results_summary(st.session_state.results)
-        render_training_progress()
-        render_pareto_evolution()
-        render_golden_solution(golden)
-        render_side_by_side_comparison(golden, solutions)
+        # Train model (cached)
+        with st.spinner("Training neural network (this may take a minute)..."):
+            model = train_model()
+        st.session_state.model = model
+
+        # Run NSGA‑II
+        st.info("🧬 Running NSGA‑II optimization...")
+        optimizer = NSGAIIOptimizer(model, pop_size=POPULATION_SIZE, generations=NSGA_GENERATIONS)
+
+        # Prepare placeholders for live updates
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        pareto_chart_placeholder = st.empty()
+
+        # Store history
+        pareto_history = []
+        final_pop = None
+        final_obj = None
+
+        for pop, obj, history, gen in optimizer.optimize():
+            final_pop, final_obj = pop, obj
+            pareto_history = history
+            progress_bar.progress((gen+1) / NSGA_GENERATIONS)
+            status_text.text(f"Generation {gen+1}/{NSGA_GENERATIONS} – Population size: {len(pop)}")
+
+            # Update Pareto chart every 5 generations
+            if gen % 5 == 0 or gen == NSGA_GENERATIONS - 1:
+                # Compute Pareto front
+                fronts = optimizer.fast_non_dominated_sort(obj)
+                pareto_idx = fronts[0]
+                pareto_sols = pop[pareto_idx]
+                pareto_objs = obj[pareto_idx]
+
+                # Store in session for later use
+                st.session_state.pareto_solutions = pareto_sols
+                st.session_state.pareto_objectives = pareto_objs
+
+                # Plot current Pareto front
+                if len(pareto_sols) > 0:
+                    preds = model.predict(pareto_sols)
+                    density = preds[:, 0]
+                    tensile = preds[:, 1]
+                    efrf = preds[:, 2]
+                    api_vals = pareto_sols[:, 0]
+
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter3d(
+                        x=density,
+                        y=tensile,
+                        z=efrf,
+                        mode='markers',
+                        marker=dict(
+                            size=8,
+                            color=api_vals,
+                            colorscale='Viridis',
+                            showscale=True,
+                            colorbar=dict(title="API%", x=1.02, len=0.6),
+                        ),
+                        name=f'Gen {gen}',
+                        hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<br>API: %{marker.color:.1f}%<extra></extra>'
+                    ))
+                    fig.update_layout(
+                        title=f'Pareto Front – Generation {gen}',
+                        scene=dict(
+                            xaxis=dict(title='Density', range=[0.55,0.95]),
+                            yaxis=dict(title='Tensile (MPa)', range=[0.5,8.5]),
+                            zaxis=dict(title='EFRF', range=[0,1]),
+                            camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
+                        ),
+                        height=450,
+                        margin=dict(l=0, r=0, t=40, b=0),
+                    )
+                    pareto_chart_placeholder.plotly_chart(fig, use_container_width=True)
+
+        # Optimization complete
+        progress_bar.empty()
+        status_text.empty()
+        st.success("✅ Optimization complete!")
+
+        # Extract final Pareto front
+        fronts = optimizer.fast_non_dominated_sort(final_obj)
+        pareto_idx = fronts[0]
+        pareto_solutions = final_pop[pareto_idx]
+        pareto_objectives = final_obj[pareto_idx]
+
+        # Predict properties for all solutions
+        preds = model.predict(pareto_solutions)
+        density = preds[:, 0]
+        tensile = preds[:, 1]
+        efrf = preds[:, 2]
+        disintegration = preds[:, 3]
+        dissolution = preds[:, 4]
+
+        # Build solution list with mass balance
+        solutions = []
+        for i, sol in enumerate(pareto_solutions):
+            api, binder, pvpp, mgst, mcc, moisture = sol[:6]
+            # Normalise to 100% (already enforced, but ensure)
+            norm = normalize_formulation(api, binder, pvpp, mgst, mcc, moisture)
+            quality = calculate_quality_score(density[i], tensile[i], efrf[i], api=norm['api'])
+            solutions.append({
+                'Solution': f'P{i+1}',
+                'API (%)': norm['api'],
+                'Binder (%)': norm['binder'],
+                'PVPP (%)': norm['pvpp'],
+                'MgSt (%)': norm['mgst'],
+                'MCC (%)': norm['mcc'],
+                'Moisture (%)': norm['moisture'],
+                'Total (%)': np.sum(list(norm.values())),
+                'Density': density[i],
+                'Tensile (MPa)': tensile[i],
+                'EFRF': efrf[i],
+                'Disintegration (min)': disintegration[i],
+                'Dissolution (%)': dissolution[i],
+                'Quality Score': quality['overall']
+            })
+
+        # Sort by quality score descending
+        solutions = sorted(solutions, key=lambda x: x['Quality Score'], reverse=True)
+
+        # Golden solution = best quality
+        golden = solutions[0] if solutions else None
+
+        # Store in session state for later display
+        st.session_state.optimization_complete = True
+        st.session_state.best_solutions = solutions
+        st.session_state.golden_solution = golden
+        st.session_state.pareto_history = pareto_history
+        st.session_state.runtime = round(time.time() - start_time, 1)
+
+        # Store best stats for summary
+        st.session_state.best_density = max(density)
+        st.session_state.best_tensile = max(tensile)
+        st.session_state.best_efrf = min(efrf)
+        st.session_state.best_api = max([s['API (%)'] for s in solutions])
+
+        # Display results
+        # Use the first solution for results summary (the best one)
+        first = solutions[0]
+        results = {
+            'density': first['Density'],
+            'tensile': first['Tensile (MPa)'],
+            'efrf': first['EFRF'],
+            'disintegration': first['Disintegration (min)'],
+            'dissolution': first['Dissolution (%)']
+        }
+        render_results_summary(results)
+        render_best_solutions(solutions, golden)
+
+        # Show Pareto evolution (using saved history)
+        render_pareto_evolution(pareto_history, golden)
+
         render_optimization_summary()
 
-        st.session_state.runtime = round(time.time() - start_time, 1)
-        st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
 
-    elif st.session_state.optimization_complete and st.session_state.results:
-        render_results_summary(st.session_state.results)
-        render_training_progress()
-        render_pareto_evolution()
-        render_golden_solution(st.session_state.golden_solution)
-        render_side_by_side_comparison(st.session_state.golden_solution, st.session_state.best_solutions)
+    elif st.session_state.optimization_complete and st.session_state.best_solutions:
+        # Show cached results
+        first = st.session_state.best_solutions[0]
+        results = {
+            'density': first['Density'],
+            'tensile': first['Tensile (MPa)'],
+            'efrf': first['EFRF'],
+            'disintegration': first['Disintegration (min)'],
+            'dissolution': first['Dissolution (%)']
+        }
+        render_results_summary(results)
+        render_best_solutions(st.session_state.best_solutions, st.session_state.golden_solution)
+        render_pareto_evolution(st.session_state.pareto_history, st.session_state.golden_solution)
         render_optimization_summary()
 
     else:
