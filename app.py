@@ -391,7 +391,6 @@ class NSGAIIOptimizer:
             for gen in range(self.generations):
                 fronts = self.fast_non_dominated_sort(obj)
                 if not fronts:
-                    # Fallback: all individuals are non‑dominated
                     fronts = [list(range(self.pop_size))]
 
                 crowding = []
@@ -403,7 +402,6 @@ class NSGAIIOptimizer:
                 selected = []
                 for _ in range(self.pop_size):
                     i1, i2 = np.random.choice(self.pop_size, 2, replace=False)
-                    # Find ranks
                     r1 = None
                     r2 = None
                     for idx, f in enumerate(fronts):
@@ -413,7 +411,6 @@ class NSGAIIOptimizer:
                             r2 = idx
                         if r1 is not None and r2 is not None:
                             break
-                    # If not found, assign rank 0
                     if r1 is None:
                         r1 = 0
                     if r2 is None:
@@ -424,7 +421,6 @@ class NSGAIIOptimizer:
                     elif r2 < r1:
                         selected.append(i2)
                     else:
-                        # Same rank: use crowding distance
                         d1 = crowding[fronts[r1].index(i1)] if i1 in fronts[r1] else -np.inf
                         d2 = crowding[fronts[r2].index(i2)] if i2 in fronts[r2] else -np.inf
                         selected.append(i1 if d1 > d2 else i2)
