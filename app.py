@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# BALANCED PENALTIES – API weight 1.0, Tensile weight 0.5
+# FINAL – Strong binder penalty to enforce minimum binder
 # ================================================================
 
 import streamlit as st
@@ -83,8 +83,8 @@ VARIABLE_MAXS = np.array([
 # ================================================================
 def initialize_session_state():
     defaults = {
-        'api': 83.0, 'binder': 4.5, 'pvpp': 5.0, 'mgst': 0.5,
-        'mcc': 6.0, 'moisture': 1.0, 'binder_grade': 0,
+        'api': 85.0, 'binder': 4.5, 'pvpp': 5.0, 'mgst': 0.5,
+        'mcc': 3.0, 'moisture': 2.0, 'binder_grade': 0,
         'particle_size': 50.0, 'pressure': 200.0, 'speed': 20.0,
         'dwell_time': 25.0, 'friction': 0.25,
         'decompression_time': 35.0, 'optimization_complete': False,
@@ -273,7 +273,7 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                 'weights': weights}
 
 # ================================================================
-# NSGA‑II OPTIMIZER – balanced penalties
+# NSGA‑II OPTIMIZER – with strong binder penalty
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model: HybridTabletModel, pop_size=50, generations=80):
@@ -312,17 +312,17 @@ class NSGAIIOptimizer:
             efrf
         ])
 
-        # --- Balanced API penalty ---
-        api_norm = (api - 80) / 18          # 0→80%, 1→98%
-        penalty_api = 1.0 * (1 - np.clip(api_norm, 0, 1))   # weight = 1.0
+        # --- API penalty (weight 1.0) ---
+        api_norm = (api - 80) / 18
+        penalty_api = 1.0 * (1 - np.clip(api_norm, 0, 1))
         fitness[:, 0] += penalty_api
 
-        # --- Strong tensile penalty ---
+        # --- Tensile penalty (weight 0.5) ---
         tensile_norm = tensile / 8.5
-        penalty_tensile = 0.5 * (1 - np.clip(tensile_norm, 0, 1))   # weight = 0.5
+        penalty_tensile = 0.5 * (1 - np.clip(tensile_norm, 0, 1))
         fitness[:, 1] += penalty_tensile
 
-        # --- Excipient minimum penalties (unchanged) ---
+        # --- Excipient penalties ---
         binder = pop[:, 1]
         pvpp   = pop[:, 2]
         mgst   = pop[:, 3]
@@ -334,14 +334,19 @@ class NSGAIIOptimizer:
         min_mgst     = 0.2
         min_mcc      = 1.0
         min_moisture = 0.5
-        penalty_weight = 0.02
 
-        pen_binder   = penalty_weight * np.maximum(0, (min_binder - binder) / min_binder)
-        pen_pvpp     = penalty_weight * np.maximum(0, (min_pvpp - pvpp) / min_pvpp)
-        pen_mgst     = penalty_weight * np.maximum(0, (min_mgst - mgst) / min_mgst)
-        pen_mcc      = penalty_weight * np.maximum(0, (min_mcc - mcc) / min_mcc)
-        pen_moisture = penalty_weight * np.maximum(0, (min_moisture - moisture) / min_moisture)
+        # Strong penalty for binder (weight = 1.0)
+        penalty_weight_binder = 1.0
+        pen_binder = penalty_weight_binder * np.maximum(0, (min_binder - binder) / min_binder)
 
+        # Mild penalties for other excipients (weight = 0.02)
+        penalty_weight_other = 0.02
+        pen_pvpp     = penalty_weight_other * np.maximum(0, (min_pvpp - pvpp) / min_pvpp)
+        pen_mgst     = penalty_weight_other * np.maximum(0, (min_mgst - mgst) / min_mgst)
+        pen_mcc      = penalty_weight_other * np.maximum(0, (min_mcc - mcc) / min_mcc)
+        pen_moisture = penalty_weight_other * np.maximum(0, (min_moisture - moisture) / min_moisture)
+
+        # Add all penalties to the tensile objective
         fitness[:, 1] += (pen_binder + pen_pvpp + pen_mgst + pen_mcc + pen_moisture)
 
         return fitness
@@ -619,7 +624,7 @@ def render_binder_grade_comparison():
     st.plotly_chart(fig, use_container_width=True)
 
 # ================================================================
-# MAIN
+# MAIN ORCHESTRATION
 # ================================================================
 def main():
     render_sidebar()
