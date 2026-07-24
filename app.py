@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL STABLE VERSION – Fixed NSGA‑II front sorting
+# FINAL STABLE VERSION – with excipient minimum penalties
 # ================================================================
 
 import streamlit as st
@@ -83,8 +83,8 @@ VARIABLE_MAXS = np.array([
 # ================================================================
 def initialize_session_state():
     defaults = {
-        'api': 96.5, 'binder': 1.4, 'pvpp': 1.0, 'mgst': 0.10,
-        'mcc': 1.5, 'moisture': 0.50, 'binder_grade': 0,
+        'api': 83.0, 'binder': 4.5, 'pvpp': 5.0, 'mgst': 0.5,
+        'mcc': 6.0, 'moisture': 1.0, 'binder_grade': 0,
         'particle_size': 50.0, 'pressure': 200.0, 'speed': 20.0,
         'dwell_time': 25.0, 'friction': 0.25,
         'decompression_time': 35.0, 'optimization_complete': False,
@@ -273,7 +273,7 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                 'weights': weights}
 
 # ================================================================
-# NSGA‑II OPTIMIZER (DUAL PENALTY: API + TENSILE)
+# NSGA‑II OPTIMIZER (DUAL PENALTY + EXCIPIENT MINIMUM PENALTIES)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model: HybridTabletModel, pop_size=50, generations=80):
@@ -305,19 +305,45 @@ class NSGAIIOptimizer:
         efrf = pred[:, 2]
         api = pop[:, 0]
 
+        # Base objectives (minimize)
         fitness = np.column_stack([
             -density,
             -tensile,
             efrf
         ])
 
+        # Penalties for low API and low tensile
         api_norm = (api - 80) / 18
         tensile_norm = tensile / 8.5
         penalty_api = 0.08 * (1 - np.clip(api_norm, 0, 1))
         penalty_tensile = 0.05 * (1 - np.clip(tensile_norm, 0, 1))
-
         fitness[:, 0] += penalty_api
         fitness[:, 1] += penalty_tensile
+
+        # --- NEW: Excipient minimum penalties ---
+        binder = pop[:, 1]
+        pvpp   = pop[:, 2]
+        mgst   = pop[:, 3]
+        mcc    = pop[:, 4]
+        moisture = pop[:, 5]
+
+        # Minimum thresholds (in %)
+        min_binder   = 1.0
+        min_pvpp     = 1.0
+        min_mgst     = 0.2
+        min_mcc      = 1.0
+        min_moisture = 0.5
+        penalty_weight = 0.05
+
+        pen_binder   = penalty_weight * np.maximum(0, (min_binder - binder) / min_binder)
+        pen_pvpp     = penalty_weight * np.maximum(0, (min_pvpp - pvpp) / min_pvpp)
+        pen_mgst     = penalty_weight * np.maximum(0, (min_mgst - mgst) / min_mgst)
+        pen_mcc      = penalty_weight * np.maximum(0, (min_mcc - mcc) / min_mcc)
+        pen_moisture = penalty_weight * np.maximum(0, (min_moisture - moisture) / min_moisture)
+
+        # Add all excipient penalties to the tensile objective (already penalized)
+        fitness[:, 1] += (pen_binder + pen_pvpp + pen_mgst + pen_mcc + pen_moisture)
+
         return fitness
 
     def fast_non_dominated_sort(self, obj: np.ndarray):
@@ -331,7 +357,6 @@ class NSGAIIOptimizer:
             for j in range(n):
                 if i == j:
                     continue
-                # Strict domination check with tolerance
                 if np.all(obj[i] <= obj[j] + 1e-9) and np.any(obj[i] < obj[j] - 1e-9):
                     dom_sol[i].append(j)
                 elif np.all(obj[j] <= obj[i] + 1e-9) and np.any(obj[j] < obj[i] - 1e-9):
@@ -496,7 +521,7 @@ class NSGAIIOptimizer:
             raise RuntimeError(f"Optimization failed: {e}") from e
 
 # ================================================================
-# UI RENDER FUNCTIONS (simplified for brevity)
+# UI RENDER FUNCTIONS
 # ================================================================
 def render_sidebar():
     with st.sidebar:
