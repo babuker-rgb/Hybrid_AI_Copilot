@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL STABLE VERSION – Full error handling + shape validation
+# FINAL STABLE VERSION – Fixed NSGA‑II front sorting
 # ================================================================
 
 import streamlit as st
@@ -294,19 +294,16 @@ class NSGAIIOptimizer:
         return balanced
 
     def evaluate(self, pop: np.ndarray) -> np.ndarray:
-        # Ensure 2D and correct shape
         if pop.ndim == 1:
             pop = pop.reshape(1, -1)
         if pop.shape[1] != self.n_vars:
             raise ValueError(f"Expected {self.n_vars} variables, got {pop.shape[1]}")
-        # Normalise
         pop_norm = (pop - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
-        # Predict
-        pred = self.model.predict(pop_norm)   # shape (n, 5)
+        pred = self.model.predict(pop_norm)
         density = pred[:, 0]
         tensile = pred[:, 1]
         efrf = pred[:, 2]
-        api = pop[:, 0]   # raw API%
+        api = pop[:, 0]
 
         fitness = np.column_stack([
             -density,
@@ -325,6 +322,8 @@ class NSGAIIOptimizer:
 
     def fast_non_dominated_sort(self, obj: np.ndarray):
         n = len(obj)
+        if n == 0:
+            return []
         fronts = []
         dom_count = np.zeros(n, dtype=int)
         dom_sol = [[] for _ in range(n)]
@@ -332,12 +331,14 @@ class NSGAIIOptimizer:
             for j in range(n):
                 if i == j:
                     continue
-                if np.all(obj[i] <= obj[j]) and np.any(obj[i] < obj[j]):
+                # Strict domination check with tolerance
+                if np.all(obj[i] <= obj[j] + 1e-9) and np.any(obj[i] < obj[j] - 1e-9):
                     dom_sol[i].append(j)
-                elif np.all(obj[j] <= obj[i]) and np.any(obj[j] < obj[i]):
+                elif np.all(obj[j] <= obj[i] + 1e-9) and np.any(obj[j] < obj[i] - 1e-9):
                     dom_count[i] += 1
             if dom_count[i] == 0:
                 fronts.append([i])
+
         curr = 0
         while True:
             next_front = []
@@ -350,6 +351,17 @@ class NSGAIIOptimizer:
                 break
             fronts.append(next_front)
             curr += 1
+
+        # Safety: ensure all individuals are assigned
+        assigned = set()
+        for f in fronts:
+            assigned.update(f)
+        missing = set(range(n)) - assigned
+        if missing:
+            if fronts:
+                fronts[-1].extend(list(missing))
+            else:
+                fronts.append(list(missing))
         return fronts
 
     def crowding_distance(self, obj: np.ndarray, front: list):
@@ -363,15 +375,13 @@ class NSGAIIOptimizer:
             dist[-1] = np.inf
             min_val = obj[sorted_idx[0], m]
             max_val = obj[sorted_idx[-1], m]
-            if max_val > min_val:
+            if max_val > min_val + 1e-9:
                 for i in range(1, n-1):
                     dist[i] += (obj[sorted_idx[i+1], m] - obj[sorted_idx[i-1], m]) / (max_val - min_val)
         return dist
 
     def optimize(self):
-        """Generator that yields (pop, obj, history, gen) each generation."""
         try:
-            # Initial population
             pop = np.random.rand(self.pop_size, self.n_vars)
             for j in range(self.n_vars):
                 pop[:, j] = pop[:, j] * (VARIABLE_MAXS[j] - VARIABLE_MINS[j]) + VARIABLE_MINS[j]
@@ -379,8 +389,11 @@ class NSGAIIOptimizer:
             obj = self.evaluate(pop)
 
             for gen in range(self.generations):
-                # Non‑dominated sorting
                 fronts = self.fast_non_dominated_sort(obj)
+                if not fronts:
+                    # Fallback: all individuals are non‑dominated
+                    fronts = [list(range(self.pop_size))]
+
                 crowding = []
                 for f in fronts:
                     d = self.crowding_distance(obj, f)
@@ -390,15 +403,30 @@ class NSGAIIOptimizer:
                 selected = []
                 for _ in range(self.pop_size):
                     i1, i2 = np.random.choice(self.pop_size, 2, replace=False)
-                    r1 = next(i for i, f in enumerate(fronts) if i1 in f)
-                    r2 = next(i for i, f in enumerate(fronts) if i2 in f)
+                    # Find ranks
+                    r1 = None
+                    r2 = None
+                    for idx, f in enumerate(fronts):
+                        if i1 in f:
+                            r1 = idx
+                        if i2 in f:
+                            r2 = idx
+                        if r1 is not None and r2 is not None:
+                            break
+                    # If not found, assign rank 0
+                    if r1 is None:
+                        r1 = 0
+                    if r2 is None:
+                        r2 = 0
+
                     if r1 < r2:
                         selected.append(i1)
                     elif r2 < r1:
                         selected.append(i2)
                     else:
-                        d1 = crowding[fronts[r1].index(i1)]
-                        d2 = crowding[fronts[r2].index(i2)]
+                        # Same rank: use crowding distance
+                        d1 = crowding[fronts[r1].index(i1)] if i1 in fronts[r1] else -np.inf
+                        d2 = crowding[fronts[r2].index(i2)] if i2 in fronts[r2] else -np.inf
                         selected.append(i1 if d1 > d2 else i2)
 
                 sel_pop = pop[selected]
@@ -454,10 +482,9 @@ class NSGAIIOptimizer:
                 pop = combined_pop[new_pop]
                 obj = combined_obj[new_pop]
 
-                # Yield every generation (with history only every 5)
                 if gen % 5 == 0 or gen == self.generations - 1:
                     fronts = self.fast_non_dominated_sort(obj)
-                    pareto_idx = fronts[0]
+                    pareto_idx = fronts[0] if fronts else list(range(len(obj)))
                     history_entry = {
                         'generation': gen,
                         'pareto_solutions': pop[pareto_idx].copy(),
@@ -468,7 +495,6 @@ class NSGAIIOptimizer:
                     yield pop, obj, [], gen
 
         except Exception as e:
-            # Catch any error, print traceback, and re-raise with context
             st.error(f"💥 Optimization generator crashed: {e}")
             st.code(traceback.format_exc())
             raise RuntimeError(f"Optimization failed: {e}") from e
@@ -523,7 +549,6 @@ def render_input_panel():
         st.caption(f"• Disintegration: {props['disintegration']:.0%}")
         st.caption(f"• Flowability: {props['flow']:.0%}")
         st.session_state.particle_size = st.slider("**Particle Size (µm)**", PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX, st.session_state.particle_size, step=5.0)
-    # Mass balance display
     summary = get_formulation_summary(st.session_state.api, st.session_state.binder,
                                       st.session_state.pvpp, st.session_state.mgst,
                                       st.session_state.mcc, st.session_state.moisture)
@@ -628,7 +653,6 @@ def main():
                 if history:
                     pareto_sols = history[0]['pareto_solutions']
                     if len(pareto_sols) > 0:
-                        # Predict outputs for these solutions
                         pop_norm = (pareto_sols - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
                         preds = model.predict(pop_norm)
                         density = preds[:, 0]
@@ -672,12 +696,10 @@ def main():
         status_text.empty()
         st.success("✅ Optimization complete!")
 
-        # Extract final Pareto front
         fronts = optimizer.fast_non_dominated_sort(final_obj)
-        pareto_idx = fronts[0]
+        pareto_idx = fronts[0] if fronts else list(range(len(final_obj)))
         pareto_solutions = final_pop[pareto_idx]
 
-        # Predict properties
         pop_norm = (pareto_solutions - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
         preds = model.predict(pop_norm)
         density = preds[:, 0]
@@ -724,7 +746,6 @@ def main():
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
 
-        # Show results summary
         st.markdown("## 📊 Optimization Results")
         first = solutions[0]
         col1, col2, col3 = st.columns(3)
