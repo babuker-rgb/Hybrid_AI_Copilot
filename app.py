@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL PRODUCTION VERSION – with 2D Pareto plots + Golden Optimum
+# BALANCED PENALTIES – API weight 1.0, Tensile weight 0.5
 # ================================================================
 
 import streamlit as st
@@ -273,7 +273,7 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                 'weights': weights}
 
 # ================================================================
-# NSGA‑II OPTIMIZER – with strong API penalty + excipient minimums
+# NSGA‑II OPTIMIZER – balanced penalties
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model: HybridTabletModel, pop_size=50, generations=80):
@@ -312,17 +312,17 @@ class NSGAIIOptimizer:
             efrf
         ])
 
-        # --- Strong API penalty ---
+        # --- Balanced API penalty ---
         api_norm = (api - 80) / 18          # 0→80%, 1→98%
-        penalty_api = 5.0 * (1 - np.clip(api_norm, 0, 1))  # heavy penalty for low API
-        fitness[:, 0] += penalty_api   # apply to density objective
+        penalty_api = 1.0 * (1 - np.clip(api_norm, 0, 1))   # weight = 1.0
+        fitness[:, 0] += penalty_api
 
-        # --- Tensile penalty (unchanged) ---
+        # --- Strong tensile penalty ---
         tensile_norm = tensile / 8.5
-        penalty_tensile = 0.05 * (1 - np.clip(tensile_norm, 0, 1))
+        penalty_tensile = 0.5 * (1 - np.clip(tensile_norm, 0, 1))   # weight = 0.5
         fitness[:, 1] += penalty_tensile
 
-        # --- Excipient minimum penalties (reduced weight) ---
+        # --- Excipient minimum penalties (unchanged) ---
         binder = pop[:, 1]
         pvpp   = pop[:, 2]
         mgst   = pop[:, 3]
@@ -521,7 +521,7 @@ class NSGAIIOptimizer:
             raise RuntimeError(f"Optimization failed: {e}") from e
 
 # ================================================================
-# UI RENDER FUNCTIONS
+# UI RENDER FUNCTIONS (unchanged)
 # ================================================================
 def render_sidebar():
     with st.sidebar:
@@ -619,7 +619,7 @@ def render_binder_grade_comparison():
     st.plotly_chart(fig, use_container_width=True)
 
 # ================================================================
-# MAIN ORCHESTRATION
+# MAIN
 # ================================================================
 def main():
     render_sidebar()
@@ -768,7 +768,7 @@ def main():
         st.balloons()
 
         # ============================================================
-        # DISPLAY RESULTS – with 2D Pareto plots and golden highlight
+        # DISPLAY RESULTS
         # ============================================================
         st.markdown("## 📊 Optimization Results")
         first = solutions[0]
@@ -777,13 +777,10 @@ def main():
         col2.metric("Tensile", f"{first['Tensile (MPa)']:.2f} MPa")
         col3.metric("Quality Score", f"{first['Quality Score']:.1f}%")
 
-        # Data table
         st.dataframe(pd.DataFrame(solutions), use_container_width=True)
 
-        # --- Pareto 2D Plots ---
         st.markdown("### 📈 Pareto Front Analysis")
-
-        # 2D: API vs Tensile
+        # API vs Tensile
         fig1 = go.Figure()
         fig1.add_trace(go.Scatter(
             x=[s['API (%)'] for s in solutions],
@@ -810,7 +807,7 @@ def main():
         )
         st.plotly_chart(fig1, use_container_width=True)
 
-        # 2D: Density vs EFRF
+        # Density vs EFRF
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(
             x=[s['Density'] for s in solutions],
@@ -837,7 +834,6 @@ def main():
         )
         st.plotly_chart(fig2, use_container_width=True)
 
-        # Optionally display the golden solution card
         st.markdown("### 🏆 Golden Balanced Optimum")
         st.markdown(f"""
         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
