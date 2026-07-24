@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FIXED: Input scaling for neural network predictions
+# FINAL FIXED VERSION – Robust input handling + error logging
 # ================================================================
 
 import streamlit as st
@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 import time
 import warnings
 import json
+import sys
 from datetime import datetime
 
 warnings.filterwarnings('ignore')
@@ -45,7 +46,6 @@ PARTICLE_SIZE_MIN, PARTICLE_SIZE_MAX = 10.0, 200.0
 DWELL_TIME_MIN, DWELL_TIME_MAX = 5.0, 50.0
 FRICTION_MIN, FRICTION_MAX = 0.1, 0.5
 DECOMPRESSION_TIME_MIN, DECOMPRESSION_TIME_MAX = 10.0, 80.0
-GRANULE_MIN, GRANULE_MAX = 30.0, 250.0
 
 BINDER_GRADES = {
     "MCC PH101": {"compressibility": 0.85, "disintegration": 0.90, "flow": 0.80},
@@ -86,7 +86,7 @@ def initialize_session_state():
         'api': 96.5, 'binder': 1.4, 'pvpp': 1.0, 'mgst': 0.10,
         'mcc': 1.5, 'moisture': 0.50, 'binder_grade': 0,
         'particle_size': 50.0, 'pressure': 200.0, 'speed': 20.0,
-        'granule': 125.0, 'dwell_time': 25.0, 'friction': 0.25,
+        'dwell_time': 25.0, 'friction': 0.25,
         'decompression_time': 35.0, 'optimization_complete': False,
         'results': None, 'best_solutions': None, 'golden_solution': None,
         'runtime': 0, 'pareto_history': None, 'model_trained': False,
@@ -165,7 +165,7 @@ class HybridTabletModel(nn.Module):
         self.fc5 = nn.Linear(hidden_dim, 5)
 
     def forward(self, x):
-        # x is expected to be in [0,1] range
+        # x is expected to be in [0,1] range, shape (batch, 12)
         h1 = torch.relu(self.bn1(self.fc1(x)))
         h2 = torch.relu(self.bn2(self.fc2(h1))) + h1
         h3 = torch.relu(self.bn3(self.fc3(h2))) + h2
@@ -178,14 +178,23 @@ class HybridTabletModel(nn.Module):
         dissolution = torch.sigmoid(out[:, 4]) * 80.0 + 10.0
         return torch.stack([density, tensile, efrf, disintegration, dissolution], dim=1)
 
-    def predict(self, x_norm: np.ndarray) -> np.ndarray:
-        """x_norm must be normalised to [0,1]."""
+    def predict(self, x_norm):
+        """x_norm can be 1D or 2D; returns numpy array of shape (n, 5)."""
         self.eval()
         with torch.no_grad():
+            # Ensure 2D
             if isinstance(x_norm, np.ndarray):
+                if x_norm.ndim == 1:
+                    x_norm = x_norm.reshape(1, -1)
                 x_norm = torch.FloatTensor(x_norm).to(DEVICE)
-            if x_norm.dim() == 1:
-                x_norm = x_norm.unsqueeze(0)
+            elif isinstance(x_norm, torch.Tensor):
+                if x_norm.dim() == 1:
+                    x_norm = x_norm.unsqueeze(0)
+                x_norm = x_norm.to(DEVICE)
+            else:
+                raise TypeError(f"Unsupported type: {type(x_norm)}")
+            # Ensure float32
+            x_norm = x_norm.float()
             return self.forward(x_norm).cpu().numpy()
 
 # ================================================================
@@ -195,7 +204,6 @@ class HybridTabletModel(nn.Module):
 def train_model():
     st.info("🧠 Training physics‑informed neural network on synthetic data...")
     X, Y = generate_synthetic_data()
-    # Normalise inputs using the global mins/maxs
     X_norm = (X - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
 
     dataset = TensorDataset(torch.FloatTensor(X_norm), torch.FloatTensor(Y))
@@ -288,9 +296,13 @@ class NSGAIIOptimizer:
         return balanced
 
     def evaluate(self, pop: np.ndarray) -> np.ndarray:
-        # Normalise before feeding to model
+        # Ensure 2D
+        if pop.ndim == 1:
+            pop = pop.reshape(1, -1)
+        # Normalise
         pop_norm = (pop - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
-        pred = self.model.predict(pop_norm)
+        # Predict
+        pred = self.model.predict(pop_norm)   # shape (n, 5)
         density = pred[:, 0]
         tensile = pred[:, 1]
         efrf = pred[:, 2]
@@ -448,12 +460,12 @@ class NSGAIIOptimizer:
                     'pareto_solutions': pop[pareto_idx].copy(),
                     'pareto_objectives': obj[pareto_idx].copy()
                 }
-                yield pop, obj, [history_entry], gen   # yield single history entry for live update
+                yield pop, obj, [history_entry], gen
             else:
                 yield pop, obj, [], gen
 
 # ================================================================
-# UI RENDER FUNCTIONS (simplified for brevity – full version in previous answer)
+# UI RENDER FUNCTIONS (simplified to save space – full version in previous answer)
 # ================================================================
 def render_sidebar():
     with st.sidebar:
@@ -519,7 +531,6 @@ def render_input_panel():
     with col3:
         st.session_state.pressure = st.slider("**Compression Pressure (MPa)**", PRESSURE_MIN, PRESSURE_MAX, st.session_state.pressure, step=2.0)
         st.session_state.speed = st.slider("**Tableting Speed (rpm)**", SPEED_MIN, SPEED_MAX, st.session_state.speed, step=0.5)
-        st.session_state.granule = st.slider("**Granule Size (µm)**", GRANULE_MIN, GRANULE_MAX, st.session_state.granule, step=5.0)
     with col4:
         st.session_state.dwell_time = st.slider("**Dwell Time (ms)**", DWELL_TIME_MIN, DWELL_TIME_MAX, st.session_state.dwell_time, step=1.0)
         st.session_state.friction = st.slider("**Friction Coefficient**", FRICTION_MIN, FRICTION_MAX, st.session_state.friction, step=0.01)
@@ -552,11 +563,8 @@ def render_binder_grade_comparison():
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# Similar rendering functions for results, Pareto, etc. are omitted for brevity.
-# They remain unchanged from the previous version – the key fix is the scaling.
-
 # ================================================================
-# MAIN
+# MAIN ORCHESTRATION
 # ================================================================
 def main():
     render_sidebar()
@@ -600,51 +608,56 @@ def main():
         final_obj = None
         all_history = []
 
-        for pop, obj, history, gen in optimizer.optimize():
-            final_pop, final_obj = pop, obj
-            all_history.extend(history)  # keep all history entries
+        try:
+            for pop, obj, history, gen in optimizer.optimize():
+                final_pop, final_obj = pop, obj
+                all_history.extend(history)
 
-            progress_bar.progress((gen+1) / NSGA_GENERATIONS)
-            status_text.text(f"Generation {gen+1}/{NSGA_GENERATIONS} – Population size: {len(pop)}")
+                progress_bar.progress((gen+1) / NSGA_GENERATIONS)
+                status_text.text(f"Generation {gen+1}/{NSGA_GENERATIONS} – Population size: {len(pop)}")
 
-            if history:
-                # Update Pareto plot
-                pareto_sols = history[0]['pareto_solutions']
-                if len(pareto_sols) > 0:
-                    # Predict outputs for these solutions
-                    pop_norm = (pareto_sols - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
-                    preds = model.predict(pop_norm)
-                    density = preds[:, 0]
-                    tensile = preds[:, 1]
-                    efrf = preds[:, 2]
-                    api_vals = pareto_sols[:, 0]
+                if history:
+                    pareto_sols = history[0]['pareto_solutions']
+                    if len(pareto_sols) > 0:
+                        # Predict outputs for these solutions
+                        pop_norm = (pareto_sols - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
+                        preds = model.predict(pop_norm)
+                        density = preds[:, 0]
+                        tensile = preds[:, 1]
+                        efrf = preds[:, 2]
+                        api_vals = pareto_sols[:, 0]
 
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter3d(
-                        x=density, y=tensile, z=efrf,
-                        mode='markers',
-                        marker=dict(
-                            size=8,
-                            color=api_vals,
-                            colorscale='Viridis',
-                            showscale=True,
-                            colorbar=dict(title="API%", x=1.02, len=0.6)
-                        ),
-                        name=f'Gen {gen}',
-                        hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<br>API: %{marker.color:.1f}%<extra></extra>'
-                    ))
-                    fig.update_layout(
-                        title=f'Pareto Front – Generation {gen}',
-                        scene=dict(
-                            xaxis=dict(title='Density', range=[0.55,0.95]),
-                            yaxis=dict(title='Tensile (MPa)', range=[0.5,8.5]),
-                            zaxis=dict(title='EFRF', range=[0,1]),
-                            camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
-                        ),
-                        height=450,
-                        margin=dict(l=0, r=0, t=40, b=0),
-                    )
-                    pareto_placeholder.plotly_chart(fig, use_container_width=True)
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter3d(
+                            x=density, y=tensile, z=efrf,
+                            mode='markers',
+                            marker=dict(
+                                size=8,
+                                color=api_vals,
+                                colorscale='Viridis',
+                                showscale=True,
+                                colorbar=dict(title="API%", x=1.02, len=0.6)
+                            ),
+                            name=f'Gen {gen}',
+                            hovertemplate='Density: %{x:.3f}<br>Tensile: %{y:.2f} MPa<br>EFRF: %{z:.3f}<br>API: %{marker.color:.1f}%<extra></extra>'
+                        ))
+                        fig.update_layout(
+                            title=f'Pareto Front – Generation {gen}',
+                            scene=dict(
+                                xaxis=dict(title='Density', range=[0.55,0.95]),
+                                yaxis=dict(title='Tensile (MPa)', range=[0.5,8.5]),
+                                zaxis=dict(title='EFRF', range=[0,1]),
+                                camera=dict(eye=dict(x=1.8, y=1.8, z=1.8))
+                            ),
+                            height=450,
+                            margin=dict(l=0, r=0, t=40, b=0),
+                        )
+                        pareto_placeholder.plotly_chart(fig, use_container_width=True)
+
+        except Exception as e:
+            st.error(f"❌ Optimization crashed: {str(e)}")
+            st.exception(e)   # show full traceback (works on Streamlit Cloud)
+            st.stop()
 
         progress_bar.empty()
         status_text.empty()
@@ -700,15 +713,36 @@ def main():
         st.session_state.best_efrf = min(efrf)
         st.session_state.best_api = max([s['API (%)'] for s in solutions])
 
-        # Display results (for brevity, we reuse the same rendering as before)
+        # Display summary (simplified)
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
 
+        # Show results
+        st.markdown("## 📊 Optimization Results")
+        first = solutions[0]
+        col1, col2, col3 = st.columns(3)
+        col1.metric("API%", f"{first['API (%)']:.1f}%")
+        col2.metric("Tensile", f"{first['Tensile (MPa)']:.2f} MPa")
+        col3.metric("Quality Score", f"{first['Quality Score']:.1f}%")
+        st.dataframe(pd.DataFrame(solutions), use_container_width=True)
+
     elif st.session_state.optimization_complete and st.session_state.best_solutions:
         st.info("Showing cached results.")
-        # Re-display results (omitted for brevity – same as before)
+        st.dataframe(pd.DataFrame(st.session_state.best_solutions), use_container_width=True)
     else:
         st.info("👆 Adjust parameters and click 'Run Hybrid Optimization' to begin.")
+        st.markdown("---")
+        st.markdown("### 🎯 Key Features")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown("**🧠 Physics-Informed AI**")
+            st.markdown("**📊 API & Tensile Penalties**")
+        with col2:
+            st.markdown("**⚖️ Mass Balance Enforced**")
+            st.markdown("**🔬 PINN Constraints**")
+        with col3:
+            st.markdown("**📈 Pareto Front**")
+            st.markdown("**🏆 Golden Solution**")
 
 if __name__ == "__main__":
     main()
