@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL FIXED VERSION – Robust input handling + error logging
+# FINAL STABLE VERSION – Full error handling + shape validation
 # ================================================================
 
 import streamlit as st
@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 import time
 import warnings
 import json
-import sys
+import traceback
 from datetime import datetime
 
 warnings.filterwarnings('ignore')
@@ -182,7 +182,6 @@ class HybridTabletModel(nn.Module):
         """x_norm can be 1D or 2D; returns numpy array of shape (n, 5)."""
         self.eval()
         with torch.no_grad():
-            # Ensure 2D
             if isinstance(x_norm, np.ndarray):
                 if x_norm.ndim == 1:
                     x_norm = x_norm.reshape(1, -1)
@@ -193,7 +192,6 @@ class HybridTabletModel(nn.Module):
                 x_norm = x_norm.to(DEVICE)
             else:
                 raise TypeError(f"Unsupported type: {type(x_norm)}")
-            # Ensure float32
             x_norm = x_norm.float()
             return self.forward(x_norm).cpu().numpy()
 
@@ -296,9 +294,11 @@ class NSGAIIOptimizer:
         return balanced
 
     def evaluate(self, pop: np.ndarray) -> np.ndarray:
-        # Ensure 2D
+        # Ensure 2D and correct shape
         if pop.ndim == 1:
             pop = pop.reshape(1, -1)
+        if pop.shape[1] != self.n_vars:
+            raise ValueError(f"Expected {self.n_vars} variables, got {pop.shape[1]}")
         # Normalise
         pop_norm = (pop - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
         # Predict
@@ -369,103 +369,112 @@ class NSGAIIOptimizer:
         return dist
 
     def optimize(self):
-        # Initial population (random)
-        pop = np.random.rand(self.pop_size, self.n_vars)
-        # Scale to physical ranges
-        for j in range(self.n_vars):
-            pop[:, j] = pop[:, j] * (VARIABLE_MAXS[j] - VARIABLE_MINS[j]) + VARIABLE_MINS[j]
-        pop = self.enforce_mass_balance(pop)
-        obj = self.evaluate(pop)
+        """Generator that yields (pop, obj, history, gen) each generation."""
+        try:
+            # Initial population
+            pop = np.random.rand(self.pop_size, self.n_vars)
+            for j in range(self.n_vars):
+                pop[:, j] = pop[:, j] * (VARIABLE_MAXS[j] - VARIABLE_MINS[j]) + VARIABLE_MINS[j]
+            pop = self.enforce_mass_balance(pop)
+            obj = self.evaluate(pop)
 
-        for gen in range(self.generations):
-            fronts = self.fast_non_dominated_sort(obj)
-            crowding = []
-            for f in fronts:
-                d = self.crowding_distance(obj, f)
-                crowding.extend(d)
-
-            # Tournament selection
-            selected = []
-            for _ in range(self.pop_size):
-                i1, i2 = np.random.choice(self.pop_size, 2, replace=False)
-                r1 = next(i for i, f in enumerate(fronts) if i1 in f)
-                r2 = next(i for i, f in enumerate(fronts) if i2 in f)
-                if r1 < r2:
-                    selected.append(i1)
-                elif r2 < r1:
-                    selected.append(i2)
-                else:
-                    d1 = crowding[fronts[r1].index(i1)]
-                    d2 = crowding[fronts[r2].index(i2)]
-                    selected.append(i1 if d1 > d2 else i2)
-
-            sel_pop = pop[selected]
-
-            # Crossover and mutation
-            offspring = []
-            for i in range(0, self.pop_size, 2):
-                p1 = sel_pop[i]
-                p2 = sel_pop[(i+1) % self.pop_size]
-                if np.random.random() < 0.8:
-                    c1 = np.zeros_like(p1)
-                    c2 = np.zeros_like(p2)
-                    for j in range(self.n_vars):
-                        if np.random.random() < 0.5:
-                            beta = 1.0 + 2.0 * np.random.random()
-                            c1[j] = 0.5 * ((1+beta)*p1[j] + (1-beta)*p2[j])
-                            c2[j] = 0.5 * ((1-beta)*p1[j] + (1+beta)*p2[j])
-                        else:
-                            c1[j] = p1[j]
-                            c2[j] = p2[j]
-                else:
-                    c1 = p1.copy()
-                    c2 = p2.copy()
-
-                for child in [c1, c2]:
-                    if np.random.random() < 0.1:
-                        for j in range(self.n_vars):
-                            if np.random.random() < 0.1:
-                                step = 0.1 * (VARIABLE_MAXS[j] - VARIABLE_MINS[j])
-                                child[j] += np.random.normal(0, step)
-                                child[j] = np.clip(child[j], VARIABLE_MINS[j], VARIABLE_MAXS[j])
-                offspring.extend([c1, c2])
-
-            offspring = np.array(offspring[:self.pop_size])
-            offspring = self.enforce_mass_balance(offspring)
-            off_obj = self.evaluate(offspring)
-
-            combined_pop = np.vstack([pop, offspring])
-            combined_obj = np.vstack([obj, off_obj])
-
-            combined_fronts = self.fast_non_dominated_sort(combined_obj)
-            new_pop = []
-            remaining = self.pop_size
-            for front in combined_fronts:
-                if len(new_pop) + len(front) <= remaining:
-                    new_pop.extend(front)
-                else:
-                    dist = self.crowding_distance(combined_obj, front)
-                    sorted_front = sorted(front, key=lambda x: dist[front.index(x)], reverse=True)
-                    new_pop.extend(sorted_front[:remaining - len(new_pop)])
-                    break
-
-            pop = combined_pop[new_pop]
-            obj = combined_obj[new_pop]
-
-            if gen % 5 == 0 or gen == self.generations - 1:
+            for gen in range(self.generations):
+                # Non‑dominated sorting
                 fronts = self.fast_non_dominated_sort(obj)
-                pareto_idx = fronts[0]
-                history_entry = {
-                    'generation': gen,
-                    'pareto_solutions': pop[pareto_idx].copy(),
-                    'pareto_objectives': obj[pareto_idx].copy()
-                }
-                yield pop, obj, [history_entry], gen
-            else:
-                yield pop, obj, [], gen
+                crowding = []
+                for f in fronts:
+                    d = self.crowding_distance(obj, f)
+                    crowding.extend(d)
+
+                # Tournament selection
+                selected = []
+                for _ in range(self.pop_size):
+                    i1, i2 = np.random.choice(self.pop_size, 2, replace=False)
+                    r1 = next(i for i, f in enumerate(fronts) if i1 in f)
+                    r2 = next(i for i, f in enumerate(fronts) if i2 in f)
+                    if r1 < r2:
+                        selected.append(i1)
+                    elif r2 < r1:
+                        selected.append(i2)
+                    else:
+                        d1 = crowding[fronts[r1].index(i1)]
+                        d2 = crowding[fronts[r2].index(i2)]
+                        selected.append(i1 if d1 > d2 else i2)
+
+                sel_pop = pop[selected]
+
+                # Crossover and mutation
+                offspring = []
+                for i in range(0, self.pop_size, 2):
+                    p1 = sel_pop[i]
+                    p2 = sel_pop[(i+1) % self.pop_size]
+                    if np.random.random() < 0.8:
+                        c1 = np.zeros_like(p1)
+                        c2 = np.zeros_like(p2)
+                        for j in range(self.n_vars):
+                            if np.random.random() < 0.5:
+                                beta = 1.0 + 2.0 * np.random.random()
+                                c1[j] = 0.5 * ((1+beta)*p1[j] + (1-beta)*p2[j])
+                                c2[j] = 0.5 * ((1-beta)*p1[j] + (1+beta)*p2[j])
+                            else:
+                                c1[j] = p1[j]
+                                c2[j] = p2[j]
+                    else:
+                        c1 = p1.copy()
+                        c2 = p2.copy()
+
+                    for child in [c1, c2]:
+                        if np.random.random() < 0.1:
+                            for j in range(self.n_vars):
+                                if np.random.random() < 0.1:
+                                    step = 0.1 * (VARIABLE_MAXS[j] - VARIABLE_MINS[j])
+                                    child[j] += np.random.normal(0, step)
+                                    child[j] = np.clip(child[j], VARIABLE_MINS[j], VARIABLE_MAXS[j])
+                    offspring.extend([c1, c2])
+
+                offspring = np.array(offspring[:self.pop_size])
+                offspring = self.enforce_mass_balance(offspring)
+                off_obj = self.evaluate(offspring)
+
+                combined_pop = np.vstack([pop, offspring])
+                combined_obj = np.vstack([obj, off_obj])
+
+                combined_fronts = self.fast_non_dominated_sort(combined_obj)
+                new_pop = []
+                remaining = self.pop_size
+                for front in combined_fronts:
+                    if len(new_pop) + len(front) <= remaining:
+                        new_pop.extend(front)
+                    else:
+                        dist = self.crowding_distance(combined_obj, front)
+                        sorted_front = sorted(front, key=lambda x: dist[front.index(x)], reverse=True)
+                        new_pop.extend(sorted_front[:remaining - len(new_pop)])
+                        break
+
+                pop = combined_pop[new_pop]
+                obj = combined_obj[new_pop]
+
+                # Yield every generation (with history only every 5)
+                if gen % 5 == 0 or gen == self.generations - 1:
+                    fronts = self.fast_non_dominated_sort(obj)
+                    pareto_idx = fronts[0]
+                    history_entry = {
+                        'generation': gen,
+                        'pareto_solutions': pop[pareto_idx].copy(),
+                        'pareto_objectives': obj[pareto_idx].copy()
+                    }
+                    yield pop, obj, [history_entry], gen
+                else:
+                    yield pop, obj, [], gen
+
+        except Exception as e:
+            # Catch any error, print traceback, and re-raise with context
+            st.error(f"💥 Optimization generator crashed: {e}")
+            st.code(traceback.format_exc())
+            raise RuntimeError(f"Optimization failed: {e}") from e
 
 # ================================================================
-# UI RENDER FUNCTIONS (simplified to save space – full version in previous answer)
+# UI RENDER FUNCTIONS (simplified for brevity)
 # ================================================================
 def render_sidebar():
     with st.sidebar:
@@ -655,8 +664,8 @@ def main():
                         pareto_placeholder.plotly_chart(fig, use_container_width=True)
 
         except Exception as e:
-            st.error(f"❌ Optimization crashed: {str(e)}")
-            st.exception(e)   # show full traceback (works on Streamlit Cloud)
+            st.error(f"❌ Optimization crashed: {e}")
+            st.code(traceback.format_exc())
             st.stop()
 
         progress_bar.empty()
@@ -667,7 +676,6 @@ def main():
         fronts = optimizer.fast_non_dominated_sort(final_obj)
         pareto_idx = fronts[0]
         pareto_solutions = final_pop[pareto_idx]
-        pareto_objectives = final_obj[pareto_idx]
 
         # Predict properties
         pop_norm = (pareto_solutions - VARIABLE_MINS) / (VARIABLE_MAXS - VARIABLE_MINS + 1e-8)
@@ -713,11 +721,10 @@ def main():
         st.session_state.best_efrf = min(efrf)
         st.session_state.best_api = max([s['API (%)'] for s in solutions])
 
-        # Display summary (simplified)
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
 
-        # Show results
+        # Show results summary
         st.markdown("## 📊 Optimization Results")
         first = solutions[0]
         col1, col2, col3 = st.columns(3)
