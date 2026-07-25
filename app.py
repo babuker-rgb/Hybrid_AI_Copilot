@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – CLEAR PARETO FRONT (PRESSURE vs DENSITY)
+# FINAL – FORCED DISTINCT SOLUTIONS
 # ================================================================
 
 import streamlit as st
@@ -53,9 +53,10 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-NSGA_POP = 120                  # increased for better front spread
+NSGA_POP = 120
 NSGA_GENS = 100
 HIDDEN_SIZE = 512
+MIN_PRESSURE_DIFF = 5.0   # minimum pressure gap between selected solutions
 
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
@@ -636,9 +637,8 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
         return None
     front = fronts[0]
     try:
-        # objectives: [ -density, -tensile, efrf, pressure ]
         pressure_vals = objectives[front, 3]
-        density_vals = -objectives[front, 0]       # recover density
+        density_vals = -objectives[front, 0]
     except Exception:
         return None
 
@@ -676,7 +676,6 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
     if tested_point is not None and len(tested_point) >= 2:
-        # tested_point: (pressure, density)
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
@@ -826,7 +825,10 @@ def main():
                 st.session_state.nsga_fronts = fronts
 
                 # ---- Extract 3 distinct solutions ----
-                balanced_solution = quality_solution = cost_solution = None
+                balanced_solution = None
+                quality_solution = None
+                cost_solution = None
+
                 if len(fronts) > 0 and len(fronts[0]) > 0:
                     front_indices = fronts[0]
                     candidates = []
@@ -845,23 +847,30 @@ def main():
                             'score': d - 20*ef - 0.01*p
                         })
 
+                    # Sort by balanced score
                     candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
                     balanced = candidates_sorted_bal[0]
                     balanced_solution = balanced['ind']
 
-                    candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
-                    quality = candidates_sorted_qual[0]
-                    if quality['idx'] == balanced['idx'] and len(candidates_sorted_qual) > 1:
-                        quality = candidates_sorted_qual[1]
+                    # ---- Quality: highest tensile, but with a minimum pressure gap from balanced ----
+                    # Filter candidates with pressure >= balanced.pressure + MIN_PRESSURE_DIFF
+                    pressure_bal = balanced['pressure']
+                    candidates_qual = [c for c in candidates if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF]
+                    if not candidates_qual:
+                        # If none, take the one farthest in pressure
+                        candidates_qual = sorted(candidates, key=lambda c: abs(c['pressure'] - pressure_bal), reverse=True)
+                    quality = max(candidates_qual, key=lambda x: x['tensile'])
                     quality_solution = quality['ind']
 
-                    candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
-                    cost = candidates_sorted_cost[0]
-                    if cost['idx'] == balanced['idx'] or cost['idx'] == quality['idx']:
-                        for c in candidates_sorted_cost:
-                            if c['idx'] != balanced['idx'] and c['idx'] != quality['idx']:
-                                cost = c
-                                break
+                    # ---- Cost: lowest pressure, but with a minimum pressure gap from both balanced and quality ----
+                    pressure_qual = quality['pressure']
+                    candidates_cost = [c for c in candidates 
+                                       if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
+                                       and abs(c['pressure'] - pressure_qual) >= MIN_PRESSURE_DIFF]
+                    if not candidates_cost:
+                        candidates_cost = sorted(candidates, 
+                                                 key=lambda c: -(abs(c['pressure'] - pressure_bal) + abs(c['pressure'] - pressure_qual)))
+                    cost = min(candidates_cost, key=lambda x: x['pressure'])
                     cost_solution = cost['ind']
 
                     st.session_state.balanced_solution = balanced_solution
