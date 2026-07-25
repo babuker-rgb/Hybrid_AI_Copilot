@@ -78,11 +78,11 @@ if 'api' not in st.session_state:
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
         'api_objective': 'Maximize (Quality)',
-        'max_api': 98.0,   # new
+        'max_api': 98.0,
     })
 
 # ================================================================
-# HELPERS (unchanged)
+# HELPERS
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     comps = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
@@ -125,7 +125,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return tau, beta
 
 # ================================================================
-# PINN MODEL (unchanged)
+# PINN MODEL
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -176,7 +176,7 @@ class MultiTaskPINN(nn.Module):
             return self.forward(X_scaled).cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (full 6 outputs) – unchanged
+# DATA GENERATION (full 6 outputs)
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -278,7 +278,7 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (with fallback) – unchanged
+# MODEL LOADER (with fallback)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -370,13 +370,10 @@ class NSGAIIOptimizer:
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
-        # Clip API to the user-defined max
         api = np.clip(api, SLIDER_API_MIN, self.max_api)
-        # Normalise other components accordingly
         api, binder, pvpp, mgst, mcc, moisture = normalize_components(
             api, binder, pvpp, mgst, mcc, moisture
         )
-        # After normalisation, API might exceed max_api again; clip again
         api = np.clip(api, SLIDER_API_MIN, self.max_api)
         pressure = np.clip(pressure, self.bounds[5,0], self.bounds[5,1])
         speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
@@ -467,9 +464,568 @@ class NSGAIIOptimizer:
         ])
         return objectives, repaired, violation
 
-    # The rest of the NSGA-II methods are identical to the previous version.
-    # To save space, I will only include the essential methods; the full code is provided at the end.
-    # For completeness, all methods are included in the final downloadable code.
-    # (I will shorten this in the answer to avoid repetition, but the final code will be complete.)
+    def _non_dominated_sort(self, objectives, violations):
+        n = objectives.shape[0]
+        fronts = []
+        remaining = list(range(n))
+        while remaining:
+            front = []
+            for i in remaining:
+                dominated = False
+                for j in remaining:
+                    if i == j:
+                        continue
+                    if (violations[j] < violations[i]) or \
+                       (violations[j] == 0 and violations[i] == 0 and
+                        np.all(objectives[j] <= objectives[i]) and
+                        np.any(objectives[j] < objectives[i])):
+                        dominated = True
+                        break
+                if not dominated:
+                    front.append(i)
+            fronts.append(front)
+            remaining = [idx for idx in remaining if idx not in front]
+        return fronts
 
-# ... (the rest of NSGA-II methods, predict, plot, and main are unchanged except for adding the max_api slider)
+    def _crowding_distance(self, objectives, front):
+        if len(front) <= 2:
+            return {idx: np.inf for idx in front}
+        dist = {idx: 0.0 for idx in front}
+        for obj_idx in range(objectives.shape[1]):
+            sorted_front = sorted(front, key=lambda i: objectives[i, obj_idx])
+            f_min = objectives[sorted_front[0], obj_idx]
+            f_max = objectives[sorted_front[-1], obj_idx]
+            if f_max - f_min > 1e-10:
+                for k in range(1, len(sorted_front)-1):
+                    dist[sorted_front[k]] += (objectives[sorted_front[k+1], obj_idx] -
+                                              objectives[sorted_front[k-1], obj_idx]) / (f_max - f_min)
+        dist[sorted_front[0]] = np.inf
+        dist[sorted_front[-1]] = np.inf
+        return dist
+
+    def _crossover(self, p1, p2, eta=40):
+        child1 = np.zeros(14)
+        child2 = np.zeros(14)
+        for i in range(14):
+            u = np.random.random()
+            if u <= 0.5:
+                beta = (2*u) ** (1/(eta+1))
+            else:
+                beta = (1/(2*(1-u))) ** (1/(eta+1))
+            child1[i] = 0.5 * ((1+beta)*p1[i] + (1-beta)*p2[i])
+            child2[i] = 0.5 * ((1-beta)*p1[i] + (1+beta)*p2[i])
+        return child1, child2
+
+    def _mutate(self, child, eta=20, pm=1.0/14.0):
+        for i in range(14):
+            if np.random.random() < pm:
+                u = np.random.random()
+                if u <= 0.5:
+                    delta = (2*u) ** (1/(eta+1)) - 1
+                else:
+                    delta = 1 - (2*(1-u)) ** (1/(eta+1))
+                child[i] = child[i] + delta * (self.bounds[i,1] - self.bounds[i,0])
+                child[i] = np.clip(child[i], self.bounds[i,0], self.bounds[i,1])
+        return child
+
+    def _tournament(self, pop, objectives, violations, fronts, crowding_dist):
+        idx1 = np.random.randint(0, len(pop))
+        idx2 = np.random.randint(0, len(pop))
+        rank1 = next((f for f, front in enumerate(fronts) if idx1 in front), len(fronts))
+        rank2 = next((f for f, front in enumerate(fronts) if idx2 in front), len(fronts))
+        if rank1 < rank2:
+            return pop[idx1]
+        elif rank2 < rank1:
+            return pop[idx2]
+        else:
+            d1 = crowding_dist.get(idx1, 0)
+            d2 = crowding_dist.get(idx2, 0)
+            return pop[idx1] if d1 > d2 else pop[idx2]
+
+    def run(self):
+        rng = np.random.default_rng()
+        pop = []
+        for _ in range(self.pop_size):
+            api = rng.uniform(SLIDER_API_MIN, self.max_api)   # initialise within bounded range
+            mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
+            binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX)
+            pvpp = rng.uniform(BOUND_PVPP_MIN, BOUND_PVPP_MAX)
+            mgst = rng.uniform(BOUND_MGST_MIN, BOUND_MGST_MAX)
+            moisture = rng.uniform(SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
+            pressure = rng.uniform(SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX)
+            speed = rng.uniform(SLIDER_SPEED_MIN, SLIDER_SPEED_MAX)
+            granule = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX)
+            particle_size = rng.uniform(SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
+            binder_grade = rng.integers(0, len(BINDER_GRADES))
+            dwell_time = rng.uniform(SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX)
+            friction = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
+            decompression_time = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
+            ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+                            particle_size, moisture, binder_grade, dwell_time, friction, decompression_time])
+            pop.append(self._repair(ind))
+        pop = np.array(pop)
+
+        for gen in range(self.generations):
+            objectives, pop, violations = self._evaluate(pop)
+            fronts = self._non_dominated_sort(objectives, violations)
+            crowding_dist = {}
+            for front in fronts:
+                dist = self._crowding_distance(objectives, front)
+                crowding_dist.update(dist)
+
+            offspring = []
+            while len(offspring) < self.pop_size:
+                p1 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
+                p2 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
+                c1, c2 = self._crossover(p1, p2)
+                c1 = self._mutate(c1)
+                c2 = self._mutate(c2)
+                offspring.append(self._repair(c1))
+                if len(offspring) < self.pop_size:
+                    offspring.append(self._repair(c2))
+            offspring = np.array(offspring[:self.pop_size])
+
+            combined = np.vstack([pop, offspring])
+            obj_comb, combined, viol_comb = self._evaluate(combined)
+            fronts_comb = self._non_dominated_sort(obj_comb, viol_comb)
+            crowding_comb = {}
+            for front in fronts_comb:
+                dist = self._crowding_distance(obj_comb, front)
+                crowding_comb.update(dist)
+
+            new_pop = []
+            remaining = self.pop_size
+            for front in fronts_comb:
+                if len(front) <= remaining:
+                    new_pop.extend(combined[front])
+                    remaining -= len(front)
+                else:
+                    sorted_idx = sorted(front, key=lambda i: crowding_comb.get(i, 0), reverse=True)
+                    new_pop.extend(combined[sorted_idx[:remaining]])
+                    remaining = 0
+                    break
+            pop = np.array(new_pop)
+
+        objectives, pop, violations = self._evaluate(pop)
+        fronts = self._non_dominated_sort(objectives, violations)
+        return pop, objectives, fronts, violations
+
+# ================================================================
+# PREDICTION AND PLOTTING
+# ================================================================
+def predict_pinn(model, scaler, y_scaler, inputs):
+    if model is None:
+        return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
+    try:
+        api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = inputs
+        api_binder = api * binder
+        pressure_binder = pressure * binder
+        api_mcc = api * mcc
+        pressure_speed = pressure * speed
+        binder_mgst = binder * mgst
+        X_input = np.array([[
+            api, mcc, pvpp, mgst, binder, pressure, speed, granule,
+            particle_size, moisture, binder_grade, dwell_time, friction, decompression_time,
+            api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
+        ]])
+        scaled = scaler.transform(X_input)
+        X_t = torch.tensor(scaled, dtype=torch.float32)
+        with torch.no_grad():
+            pred_scaled = model.predict(X_t)[0]
+            pred = y_scaler.inverse_transform([pred_scaled])[0]
+        density = pred[0]
+        tensile = max(pred[1], 1e-4)
+        er = max(pred[2], 1e-4)
+        efrf = er / tensile
+        disintegration = max(pred[3], 0.5)
+        dissolution_tau = max(pred[4], 1.0)
+        dissolution_beta = max(pred[5], 0.5)
+        return density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta
+    except Exception as e:
+        st.error(f"Prediction error: {e}")
+        return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
+
+def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
+                      model=None, scaler=None, y_scaler=None, tested_point=None):
+    if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
+        return None
+    front = fronts[0]
+    try:
+        api_vals = pop[front, 0]
+        efrf_vals = objectives[front, 2]
+    except Exception:
+        return None
+
+    sorted_idx = np.argsort(api_vals)
+    api_vals = api_vals[sorted_idx]
+    efrf_vals = efrf_vals[sorted_idx]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=api_vals,
+        y=efrf_vals,
+        mode='lines+markers',
+        name='Pareto Front (API vs EFRF)',
+        line=dict(color='red', width=2),
+        marker=dict(size=7, color='red'),
+        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+    ))
+
+    def add_solution(solution, label, color, symbol):
+        if solution is not None:
+            api = solution[0]
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+            fig.add_trace(go.Scatter(
+                x=[api],
+                y=[ef],
+                mode='markers',
+                name=label,
+                marker=dict(size=14, color=color, symbol=symbol, line=dict(width=1, color='black')),
+                hovertemplate=f'{label}<br>API: {api:.1f}%<br>EFRF: {ef:.4f}<extra></extra>'
+            ))
+
+    add_solution(balanced_solution, '⚖️ Balanced', 'gold', 'star')
+    add_solution(quality_solution, '🏆 Quality', 'green', 'diamond')
+    add_solution(cost_solution, '💰 Cost', 'orange', 'square')
+
+    if tested_point is not None and len(tested_point) >= 2:
+        fig.add_trace(go.Scatter(
+            x=[tested_point[0]],
+            y=[tested_point[1]],
+            mode='markers',
+            name='Tested Formulation',
+            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
+            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+        ))
+
+    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
+                  annotation_text='EFRF threshold (0.40)')
+    fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
+                  annotation_text=f'API min ({SLIDER_API_MIN}%)')
+    # Use the max_api from session state for the vertical line, but we don't have it in this function.
+    # We'll just show a generic annotation.
+    fig.update_layout(
+        title='Pareto Front – API vs EFRF Trade‑off',
+        xaxis_title='API (%)',
+        yaxis_title='EFRF',
+        height=450,
+        template='plotly_white',
+        legend=dict(x=0.8, y=0.95)
+    )
+    return fig
+
+# ================================================================
+# MAIN
+# ================================================================
+def main():
+    st.markdown("""
+    <div style="background: #0b1a33; padding:1rem; border-radius:0.5rem; text-align:center; margin-bottom:1rem;">
+        <h2 style="color:#fff; margin:0;">🧬 Hybrid AI · Multi-Objective Tablet Optimization</h2>
+        <p style="color:#64ffda; margin:0; font-size:0.9rem;">Nile Valley University · Sudan · v29.28‑R32</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    model, scaler, y_scaler, features, df = get_model()
+
+    with st.sidebar:
+        st.markdown("### 📊 Formulation & Material Parameters")
+        with st.container(border=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                api = st.slider("API (%)", SLIDER_API_MIN, SLIDER_API_MAX, st.session_state.api, 0.1, key="api")
+                binder = st.slider("Binder (%)", SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, st.session_state.binder, 0.1, key="binder")
+                pvpp = st.slider("PVPP (%)", SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, st.session_state.pvpp, 0.1, key="pvpp")
+                mgst = st.slider("Mg-St (%)", SLIDER_MGST_MIN, SLIDER_MGST_MAX, st.session_state.mgst, 0.01, key="mgst")
+                mcc = st.slider("MCC (%)", SLIDER_MCC_MIN, SLIDER_MCC_MAX, st.session_state.mcc, 0.1, key="mcc")
+            with c2:
+                moisture = st.slider("Moisture (%)", SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, st.session_state.moisture, 0.1, key="moisture")
+                particle_size = st.slider("Particle Size (µm)", SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, st.session_state.particle_size, 1.0, key="particle_size")
+                binder_grade = st.selectbox("Binder Grade", BINDER_GRADES, index=st.session_state.binder_grade_index, key="binder_grade_select")
+                st.session_state.binder_grade_index = BINDER_GRADES.index(binder_grade)
+            total = api + binder + pvpp + mgst + mcc + moisture
+            if abs(total-100) < 0.5:
+                st.success(f"✅ Total = {total:.2f}%")
+            else:
+                st.warning(f"⚠️ Total = {total:.2f}% (should be 100%)")
+
+        st.markdown("### ⚙️ Process Parameters")
+        with st.container(border=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                pressure = st.slider("Pressure (MPa)", SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX, st.session_state.pressure, 1.0, key="pressure")
+                speed = st.slider("Speed (rpm)", SLIDER_SPEED_MIN, SLIDER_SPEED_MAX, st.session_state.speed, 0.5, key="speed")
+                granule_mode = st.radio("Granule Size", options=["Fixed", "Variable"], horizontal=True, key="granule_mode_select")
+                if granule_mode == "Fixed":
+                    granule = st.slider("Granule Size (µm)", SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, st.session_state.granule, 1.0, key="granule")
+                    granule_fixed = True
+                else:
+                    granule = st.session_state.get('granule', 125.0)
+                    granule_fixed = False
+                    st.info("Granule size optimised by NSGA-II")
+            with c2:
+                dwell_time = st.slider("Dwell Time (ms)", SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX, st.session_state.dwell_time, 0.5, key="dwell_time")
+                friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
+                decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
+
+        st.markdown("### ⚙️ API Objective Direction")
+        current_obj = st.session_state.get('api_objective', 'Maximize (Quality)')
+        api_obj = st.radio(
+            "API Objective:",
+            options=["Maximize (Quality)", "Minimize (Cost)"],
+            index=0 if current_obj == "Maximize (Quality)" else 1,
+            key="api_objective_radio"
+        )
+        st.session_state.api_objective = api_obj
+
+        st.markdown("### ⚙️ Max API for Optimisation")
+        max_api = st.slider(
+            "Max API (%) for NSGA‑II",
+            min_value=80.0,
+            max_value=98.0,
+            value=st.session_state.get('max_api', 98.0),
+            step=0.5,
+            key="max_api_slider"
+        )
+        st.session_state.max_api = max_api
+        st.caption(f"API will be capped at {max_api:.1f}% during optimisation.")
+
+        st.markdown("### ⚙️ Balanced Score Weights")
+        with st.container(border=True):
+            st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
+            st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
+            st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
+
+        predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
+
+    with st.container():
+        st.markdown("### 📈 Results")
+
+        if predict_btn:
+            if model is None:
+                st.error("❌ Model not loaded.")
+            elif abs(total-100) > 0.5:
+                st.warning("⚠️ Formulation must sum to 100%")
+            else:
+                api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
+                    api, binder, pvpp, mgst, mcc, moisture
+                )
+                granule_use = granule if granule_fixed else granule
+                inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use,
+                          particle_size, moisture_n, st.session_state.binder_grade_index, dwell_time, friction, decompression_time]
+
+                density, tensile, er, efrf, disintegration, _, _ = predict_pinn(model, scaler, y_scaler, inputs)
+
+                st.markdown("**Constraint Status**")
+                col_metrics = st.columns(5)
+                col_metrics[0].metric("Density", f"{density:.3f}", f"[0.72, {D_MAX:.2f}]")
+                col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
+                col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< 0.40")
+                col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ 8.0%")
+                col_metrics[4].metric("Disintegration", f"{disintegration:.1f} min", f"≤ 15 min")
+
+                constraints_ok = (D_MIN <= density <= D_MAX and tensile >= TENSILE_MIN and
+                                   efrf < 0.40 and mcc_n <= 8.0 and disintegration <= 15.0)
+                if constraints_ok:
+                    st.success("✅ All constraints satisfied")
+                else:
+                    st.error("❌ Constraints violated")
+
+                # ---- NSGA-II ----
+                bounds = np.array([
+                    [SLIDER_API_MIN, SLIDER_API_MAX],
+                    [BOUND_MCC_MIN, BOUND_MCC_MAX],
+                    [BOUND_PVPP_MIN, BOUND_PVPP_MAX],
+                    [BOUND_MGST_MIN, BOUND_MGST_MAX],
+                    [BOUND_BINDER_MIN, BOUND_BINDER_MAX],
+                    [SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX],
+                    [SLIDER_SPEED_MIN, SLIDER_SPEED_MAX],
+                    [SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX],
+                    [SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX],
+                    [SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX],
+                    [0, len(BINDER_GRADES)-1],
+                    [SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX],
+                    [SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX],
+                    [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
+                ])
+
+                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS}, max API={max_api:.1f}%) ..."):
+                    nsga = NSGAIIOptimizer(
+                        model, scaler, y_scaler, bounds,
+                        pop=NSGA_POP, gens=NSGA_GENS,
+                        granule_fixed=granule_fixed,
+                        granule_fixed_val=granule_use,
+                        api_objective=api_obj,
+                        max_api=max_api
+                    )
+                    pop, objectives, fronts, violations = nsga.run()
+
+                st.session_state.nsga_pop = pop
+                st.session_state.nsga_objectives = objectives
+                st.session_state.nsga_fronts = fronts
+
+                # ---- Extract 3 distinct solutions with API spread ----
+                balanced_solution = None
+                quality_solution = None
+                cost_solution = None
+
+                if len(fronts) > 0 and len(fronts[0]) > 0:
+                    front_indices = fronts[0]
+                    candidates = []
+                    for idx in front_indices:
+                        ind = pop[idx]
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, ind)
+                        p = ind[5]
+                        api_val = ind[0]
+                        candidates.append({
+                            'idx': idx,
+                            'ind': ind,
+                            'density': d,
+                            'tensile': t,
+                            'efrf': ef,
+                            'pressure': p,
+                            'api': api_val,
+                            'disintegration': dis,
+                            'score': d - 20*ef - 0.01*p + 0.05*api_val
+                        })
+
+                    # Balanced: best score
+                    candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
+                    balanced = candidates_sorted_bal[0]
+                    balanced_solution = balanced['ind']
+                    pressure_bal = balanced['pressure']
+                    api_bal = balanced['api']
+
+                    # Quality: highest tensile, must differ in both API and pressure
+                    candidates_qual = [c for c in candidates 
+                                       if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
+                                       and abs(c['api'] - api_bal) >= MIN_API_DIFF]
+                    if not candidates_qual:
+                        candidates_qual = sorted(candidates, 
+                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal), 
+                                                 reverse=True)
+                    quality = max(candidates_qual, key=lambda x: x['tensile'])
+                    quality_solution = quality['ind']
+                    pressure_qual = quality['pressure']
+                    api_qual = quality['api']
+
+                    # Cost: lowest pressure, must differ from both balanced and quality
+                    candidates_cost = [c for c in candidates 
+                                       if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
+                                       and abs(c['api'] - api_bal) >= MIN_API_DIFF
+                                       and abs(c['pressure'] - pressure_qual) >= MIN_PRESSURE_DIFF
+                                       and abs(c['api'] - api_qual) >= MIN_API_DIFF]
+                    if not candidates_cost:
+                        candidates_cost = sorted(candidates, 
+                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal) +
+                                                                abs(c['pressure'] - pressure_qual) + abs(c['api'] - api_qual),
+                                                 reverse=True)
+                    cost = min(candidates_cost, key=lambda x: x['pressure'])
+                    cost_solution = cost['ind']
+
+                    st.session_state.balanced_solution = balanced_solution
+                    st.session_state.quality_solution = quality_solution
+                    st.session_state.cost_solution = cost_solution
+
+                    if balanced_solution is not None:
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                        st.session_state.balanced_pred = (d, t, e, ef, dis)
+                    if quality_solution is not None:
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, quality_solution)
+                        st.session_state.quality_pred = (d, t, e, ef, dis)
+                    if cost_solution is not None:
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, cost_solution)
+                        st.session_state.cost_pred = (d, t, e, ef, dis)
+
+                # ---- Show Pareto Front ----
+                st.markdown("### 📉 Pareto Front – API vs EFRF")
+                if fronts is not None and len(fronts[0]) > 0:
+                    st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
+                    fig = plot_pareto_front(
+                        objectives, fronts, pop,
+                        balanced_solution=balanced_solution,
+                        quality_solution=quality_solution,
+                        cost_solution=cost_solution,
+                        model=model, scaler=scaler, y_scaler=y_scaler,
+                        tested_point=(api_n, efrf) if constraints_ok else None
+                    )
+                    if fig is not None:
+                        st.plotly_chart(fig, use_container_width=True)
+
+                # ---- Show Solutions Table ----
+                st.markdown("### 📊 Optimal Solutions Comparison")
+                rows = []
+                if balanced_solution is not None and st.session_state.balanced_pred is not None:
+                    d, t, e, ef, dis = st.session_state.balanced_pred
+                    rows.append({
+                        "Type": "⚖️ Balanced",
+                        "API (%)": round(balanced_solution[0], 1),
+                        "MCC (%)": round(balanced_solution[1], 1),
+                        "PVPP (%)": round(balanced_solution[2], 1),
+                        "Mg-St (%)": round(balanced_solution[3], 2),
+                        "Binder (%)": round(balanced_solution[4], 1),
+                        "Moisture (%)": round(balanced_solution[9], 1),
+                        "Pressure (MPa)": round(balanced_solution[5], 1),
+                        "Speed (rpm)": round(balanced_solution[6], 1),
+                        "Granule (µm)": round(balanced_solution[7], 0),
+                        "Particle Size (µm)": round(balanced_solution[8], 0),
+                        "Binder Grade": BINDER_GRADES[int(balanced_solution[10])],
+                        "Density": round(d, 3),
+                        "Tensile (MPa)": round(t, 3),
+                        "EFRF": round(ef, 4),
+                        "Disintegration (min)": round(dis, 1),
+                    })
+                if st.session_state.show_cost_solution and cost_solution is not None and st.session_state.cost_pred is not None:
+                    d, t, e, ef, dis = st.session_state.cost_pred
+                    rows.append({
+                        "Type": "💰 Cost-Optimized",
+                        "API (%)": round(cost_solution[0], 1),
+                        "MCC (%)": round(cost_solution[1], 1),
+                        "PVPP (%)": round(cost_solution[2], 1),
+                        "Mg-St (%)": round(cost_solution[3], 2),
+                        "Binder (%)": round(cost_solution[4], 1),
+                        "Moisture (%)": round(cost_solution[9], 1),
+                        "Pressure (MPa)": round(cost_solution[5], 1),
+                        "Speed (rpm)": round(cost_solution[6], 1),
+                        "Granule (µm)": round(cost_solution[7], 0),
+                        "Particle Size (µm)": round(cost_solution[8], 0),
+                        "Binder Grade": BINDER_GRADES[int(cost_solution[10])],
+                        "Density": round(d, 3),
+                        "Tensile (MPa)": round(t, 3),
+                        "EFRF": round(ef, 4),
+                        "Disintegration (min)": round(dis, 1),
+                    })
+                if st.session_state.show_quality_solution and quality_solution is not None and st.session_state.quality_pred is not None:
+                    d, t, e, ef, dis = st.session_state.quality_pred
+                    rows.append({
+                        "Type": "🏆 Quality-Optimized",
+                        "API (%)": round(quality_solution[0], 1),
+                        "MCC (%)": round(quality_solution[1], 1),
+                        "PVPP (%)": round(quality_solution[2], 1),
+                        "Mg-St (%)": round(quality_solution[3], 2),
+                        "Binder (%)": round(quality_solution[4], 1),
+                        "Moisture (%)": round(quality_solution[9], 1),
+                        "Pressure (MPa)": round(quality_solution[5], 1),
+                        "Speed (rpm)": round(quality_solution[6], 1),
+                        "Granule (µm)": round(quality_solution[7], 0),
+                        "Particle Size (µm)": round(quality_solution[8], 0),
+                        "Binder Grade": BINDER_GRADES[int(quality_solution[10])],
+                        "Density": round(d, 3),
+                        "Tensile (MPa)": round(t, 3),
+                        "EFRF": round(ef, 4),
+                        "Disintegration (min)": round(dis, 1),
+                    })
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+                st.markdown("---")
+                st.toggle("💰 Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", True), key="show_cost_solution")
+                st.toggle("🏆 Show Quality-wise Solution", value=st.session_state.get("show_quality_solution", True), key="show_quality_solution")
+
+        else:
+            st.info("👆 Adjust parameters and click 'Predict & Optimize' to see results.")
+
+    st.caption("📧 Contact: babuker@protonmail.com | 🏛️ Nile Valley University, Sudan")
+
+if __name__ == "__main__":
+    main()
