@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# COMPLETE PRODUCTION CODE – 4‑OBJECTIVE NSGA‑II & CLEAR FRONT
+# FINAL PRODUCTION CODE – 4‑OBJECTIVE NSGA‑II + FIXED FALLBACK
 # ================================================================
 
 import streamlit as st
@@ -12,8 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-import plotly.express as px
+from sklearn.metrics import r2_score, mean_squared_error
 import plotly.graph_objects as go
 import os
 import warnings
@@ -54,12 +53,10 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# ---- NSGA‑II parameters ----
 NSGA_POP = 100
 NSGA_GENS = 80
 HIDDEN_SIZE = 512
 
-# ---- Fallback training ----
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
@@ -81,7 +78,7 @@ if 'api' not in st.session_state:
     })
 
 # ================================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     comps = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
@@ -116,6 +113,13 @@ def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
     time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
     return np.clip(time, 1.0, 30.0)
 
+def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
+    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
+    tau = np.clip(tau, 2.0, 20.0)
+    beta = 1.0 + 0.01 * (particle_size - 50) / 50
+    beta = np.clip(beta, 0.8, 2.5)
+    return tau, beta
+
 # ================================================================
 # PINN MODEL
 # ================================================================
@@ -148,7 +152,7 @@ class MultiTaskPINN(nn.Module):
         self.res2 = ResidualBlock(hidden, dropout=0.05)
         self.res3 = ResidualBlock(hidden, dropout=0.05)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh(), nn.Dropout(0.05))
-        self.output = nn.Linear(hidden//2, 6)
+        self.output = nn.Linear(hidden//2, 6)   # 6 outputs: density, tensile, er, disintegration, tau, beta
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -165,11 +169,10 @@ class MultiTaskPINN(nn.Module):
                 X_scaled = torch.tensor(X_scaled, dtype=torch.float32)
             device = next(self.parameters()).device
             X_scaled = X_scaled.to(device)
-            output = self.forward(X_scaled)
-            return output.cpu().numpy()
+            return self.forward(X_scaled).cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (for fallback training) – kept as original
+# DATA GENERATION (full 6 outputs)
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -218,7 +221,7 @@ def generate_pinn_data(n_samples, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations (simplified but reasonable)
+    # Physics simulations (same as original)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -258,16 +261,21 @@ def generate_pinn_data(n_samples, random_state=42):
 
     disintegration = predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n)
     disintegration = np.clip(disintegration, 1.0, 30.0)
+    tau, beta = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
+    tau = np.clip(tau, 2.0, 20.0)
+    beta = np.clip(beta, 0.8, 2.5)
 
     df = pd.DataFrame(X_enhanced, columns=feature_names)
     df['Density'] = D
     df['Tensile_Strength_MPa'] = tensile
     df['Elastic_Recovery_%'] = er
     df['Disintegration_Time_min'] = disintegration
+    df['Dissolution_Tau'] = tau
+    df['Dissolution_Beta'] = beta
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (with fallback training)
+# MODEL LOADER (with fallback)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -289,12 +297,10 @@ def get_model():
         st.info("ℹ️ Pre-trained model not found. Training fallback model (this may take a few minutes)...")
 
     # ---- Fallback training ----
-    N_SAMPLES = FALLBACK_SAMPLES
-    ADAM_EPOCHS = FALLBACK_EPOCHS
-    df, features = generate_pinn_data(N_SAMPLES)
+    df, features = generate_pinn_data(FALLBACK_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
-            'Disintegration_Time_min']].values   # only 4 outputs now (drop dissolution)
+            'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
@@ -316,17 +322,17 @@ def get_model():
 
     progress_bar = st.progress(0)
     status_text = st.empty()
-    for epoch in range(ADAM_EPOCHS):
+    for epoch in range(FALLBACK_EPOCHS):
         model.train()
         optimizer.zero_grad()
-        y_pred = model(X_train_t)
+        y_pred = model(X_train_t)          # shape (batch, 6)
         loss = nn.MSELoss()(y_pred, y_train_t)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         scheduler.step(loss.item())
-        progress_bar.progress((epoch+1)/ADAM_EPOCHS)
-        status_text.text(f"Training fallback model: epoch {epoch+1}/{ADAM_EPOCHS}")
+        progress_bar.progress((epoch+1)/FALLBACK_EPOCHS)
+        status_text.text(f"Training fallback model: epoch {epoch+1}/{FALLBACK_EPOCHS}")
     progress_bar.empty()
     status_text.empty()
 
@@ -343,7 +349,7 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – 4 OBJECTIVES (density, tensile, efrf, pressure)
+# NSGA-II OPTIMIZER – 4 OBJECTIVES
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -422,9 +428,10 @@ class NSGAIIOptimizer:
         tensile = pred[:, 1]
         er = pred[:, 2]
         disintegration = pred[:, 3]
+        # dissolution_tau = pred[:, 4], dissolution_beta = pred[:, 5] – not used
 
         efrf = er / np.maximum(tensile, 1e-4)
-        pressure = repaired[:, 5]   # pressure is the 6th variable (index 5)
+        pressure = repaired[:, 5]
 
         # Constraint violations
         violation = np.zeros(n)
@@ -437,12 +444,11 @@ class NSGAIIOptimizer:
 
         # 4 objectives: maximize density, maximize tensile, minimize efrf, minimize pressure
         objectives = np.column_stack([
-            -density,          # minimize -density => maximize density
-            -tensile,          # minimize -tensile => maximize tensile
-            efrf,              # minimize efrf
-            pressure           # minimize pressure (cost)
+            -density,
+            -tensile,
+            efrf,
+            pressure
         ])
-
         return objectives, repaired, violation
 
     def _non_dominated_sort(self, objectives, violations):
@@ -456,7 +462,6 @@ class NSGAIIOptimizer:
                 for j in remaining:
                     if i == j:
                         continue
-                    # Constraint dominance: if j has lower violation, or both feasible and j dominates i
                     if (violations[j] < violations[i]) or \
                        (violations[j] == 0 and violations[i] == 0 and
                         np.all(objectives[j] <= objectives[i]) and
@@ -593,11 +598,11 @@ class NSGAIIOptimizer:
         return pop, objectives, fronts, violations
 
 # ================================================================
-# PREDICTION AND PLOTTING FUNCTIONS
+# PREDICTION AND PLOTTING
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
-        return 0.72, 2.0, 0.5, 0.25, 10.0
+        return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
     try:
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = inputs
         api_binder = api * binder
@@ -620,37 +625,30 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         er = max(pred[2], 1e-4)
         efrf = er / tensile
         disintegration = max(pred[3], 0.5)
-        return density, tensile, er, efrf, disintegration
+        dissolution_tau = max(pred[4], 1.0)
+        dissolution_beta = max(pred[5], 0.5)
+        return density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta
     except Exception as e:
         st.error(f"Prediction error: {e}")
-        return 0.72, 2.0, 0.5, 0.25, 10.0
+        return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
 def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None):
-    """
-    Plot the Pareto front in 2D: Pressure vs EFRF (or Pressure vs Tensile).
-    The user can clearly see the trade-off between cost (pressure) and quality (EFRF/tensile).
-    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
-        # objectives: columns: -density, -tensile, efrf, pressure
-        pressure_vals = objectives[front, 3]           # pressure (minimized)
-        efrf_vals = objectives[front, 2]               # efrf (minimized)
-        tensile_vals = -objectives[front, 1]           # tensile (maximized)
-    except Exception as e:
+        pressure_vals = objectives[front, 3]
+        efrf_vals = objectives[front, 2]
+    except Exception:
         return None
 
-    # Sort by pressure for a smooth line
     sorted_idx = np.argsort(pressure_vals)
     pressure_vals = pressure_vals[sorted_idx]
     efrf_vals = efrf_vals[sorted_idx]
-    tensile_vals = tensile_vals[sorted_idx]
 
     fig = go.Figure()
 
-    # Pareto front (Pressure vs EFRF)
     fig.add_trace(go.Scatter(
         x=pressure_vals,
         y=efrf_vals,
@@ -661,10 +659,9 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
         hovertemplate='Pressure: %{x:.1f} MPa<br>EFRF: %{y:.4f}<extra></extra>'
     ))
 
-    # Add selected solutions
     def add_solution(solution, label, color, symbol):
         if solution is not None:
-            d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, solution)
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
             p = solution[5]
             fig.add_trace(go.Scatter(
                 x=[p],
@@ -679,9 +676,7 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
     add_solution(quality_solution, '🏆 Quality', 'green', 'diamond')
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
-    # Tested point
     if tested_point is not None and len(tested_point) >= 2:
-        # tested_point: (pressure, efrf)
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
@@ -704,7 +699,7 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
     return fig
 
 # ================================================================
-# MAIN APPLICATION
+# MAIN
 # ================================================================
 def main():
     st.markdown("""
@@ -715,9 +710,6 @@ def main():
     """, unsafe_allow_html=True)
 
     model, scaler, y_scaler, features, df = get_model()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if model is not None:
-        device = next(model.parameters()).device
 
     with st.sidebar:
         st.markdown("### 📊 Formulation & Material Parameters")
@@ -759,9 +751,8 @@ def main():
                 friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
-        st.markdown("### ⚙️ Penalty Adjustment (for balanced score)")
+        st.markdown("### ⚙️ Balanced Score Weights")
         with st.container(border=True):
-            # These sliders are only used to compute the balanced score, not in NSGA-II
             penalty_api = st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
             penalty_tensile = st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
             penalty_efrf = st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
@@ -784,7 +775,7 @@ def main():
                 inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use,
                           particle_size, moisture_n, st.session_state.binder_grade_index, dwell_time, friction, decompression_time]
 
-                density, tensile, er, efrf, disintegration = predict_pinn(model, scaler, y_scaler, inputs)
+                density, tensile, er, efrf, disintegration, _, _ = predict_pinn(model, scaler, y_scaler, inputs)
 
                 st.markdown("**Constraint Status**")
                 col_metrics = st.columns(5)
@@ -831,7 +822,6 @@ def main():
                 st.session_state.nsga_pop = pop
                 st.session_state.nsga_objectives = objectives
                 st.session_state.nsga_fronts = fronts
-                st.session_state.run_optimized = True
 
                 # ---- Extract 3 distinct solutions ----
                 balanced_solution = quality_solution = cost_solution = None
@@ -840,7 +830,7 @@ def main():
                     candidates = []
                     for idx in front_indices:
                         ind = pop[idx]
-                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, ind)
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, ind)
                         p = ind[5]
                         candidates.append({
                             'idx': idx,
@@ -850,7 +840,7 @@ def main():
                             'efrf': ef,
                             'pressure': p,
                             'disintegration': dis,
-                            'score': d - 20*ef - 0.01*p   # balanced score
+                            'score': d - 20*ef - 0.01*p
                         })
 
                     # Balanced: best score
@@ -881,13 +871,13 @@ def main():
 
                     # Store predictions
                     if balanced_solution:
-                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
                         st.session_state.balanced_pred = (d, t, e, ef, dis)
                     if quality_solution:
-                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, quality_solution)
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, quality_solution)
                         st.session_state.quality_pred = (d, t, e, ef, dis)
                     if cost_solution:
-                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, cost_solution)
+                        d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, cost_solution)
                         st.session_state.cost_pred = (d, t, e, ef, dis)
 
                 # ---- Show Pareto Front ----
