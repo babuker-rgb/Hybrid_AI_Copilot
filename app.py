@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – API TRADE‑OFF TOGGLE (MAX / MIN)
+# FINAL – API TOGGLE WITH SAFE SESSION STATE
 # ================================================================
 
 import streamlit as st
@@ -62,7 +62,7 @@ FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
 # ================================================================
-# SESSION STATE
+# SESSION STATE (with safe defaults)
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -76,7 +76,7 @@ if 'api' not in st.session_state:
         'run_optimized': False,
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
-        'api_objective': 'Maximize (Quality)',
+        'api_objective': 'Maximize (Quality)',   # default
     })
 
 # ================================================================
@@ -762,10 +762,12 @@ def main():
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
         st.markdown("### ⚙️ API Objective Direction")
+        # Safely get current value from session state
+        current_obj = st.session_state.get('api_objective', 'Maximize (Quality)')
         api_obj = st.radio(
             "API Objective:",
             options=["Maximize (Quality)", "Minimize (Cost)"],
-            index=0 if st.session_state.api_objective == "Maximize (Quality)" else 1,
+            index=0 if current_obj == "Maximize (Quality)" else 1,
             key="api_objective_radio"
         )
         st.session_state.api_objective = api_obj
@@ -865,7 +867,7 @@ def main():
                             'pressure': p,
                             'api': api_val,
                             'disintegration': dis,
-                            'score': d - 20*ef - 0.01*p + 0.05*api_val  # balanced score includes API
+                            'score': d - 20*ef - 0.01*p + 0.05*api_val
                         })
 
                     candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
