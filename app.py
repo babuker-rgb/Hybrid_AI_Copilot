@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – 5 OBJECTIVES + PARETO SPREAD IN API
+# FINAL – API TRADE‑OFF TOGGLE (MAX / MIN)
 # ================================================================
 
 import streamlit as st
@@ -56,7 +56,7 @@ BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 NSGA_POP = 120
 NSGA_GENS = 100
 HIDDEN_SIZE = 512
-MIN_PRESSURE_DIFF = 5.0   # minimum pressure gap between selected solutions
+MIN_PRESSURE_DIFF = 5.0
 
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
@@ -76,6 +76,7 @@ if 'api' not in st.session_state:
         'run_optimized': False,
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
+        'api_objective': 'Maximize (Quality)',
     })
 
 # ================================================================
@@ -348,11 +349,11 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – 5 OBJECTIVES (added API)
+# NSGA-II OPTIMIZER – 5 OBJECTIVES (API direction toggle)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
-                 granule_fixed=True, granule_fixed_val=125.0):
+                 granule_fixed=True, granule_fixed_val=125.0, api_objective='Maximize (Quality)'):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -361,6 +362,7 @@ class NSGAIIOptimizer:
         self.generations = gens
         self.granule_fixed = granule_fixed
         self.granule_fixed_val = granule_fixed_val
+        self.api_objective = api_objective
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -430,9 +432,8 @@ class NSGAIIOptimizer:
 
         efrf = er / np.maximum(tensile, 1e-4)
         pressure = repaired[:, 5]
-        api = repaired[:, 0]   # already normalized and clipped
+        api = repaired[:, 0]
 
-        # Constraint violations
         violation = np.zeros(n)
         violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
         violation += np.maximum(0, TENSILE_MIN - tensile)
@@ -441,13 +442,18 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # 5 objectives: maximize density, maximize tensile, minimize efrf, minimize pressure, maximize API
+        # 5th objective: API direction
+        if self.api_objective == 'Maximize (Quality)':
+            api_obj = -api          # maximize API
+        else:  # Minimize (Cost)
+            api_obj = api           # minimize API
+
         objectives = np.column_stack([
             -density,
             -tensile,
             efrf,
             pressure,
-            -api       # we want to maximize API
+            api_obj
         ])
         return objectives, repaired, violation
 
@@ -634,15 +640,10 @@ def predict_pinn(model, scaler, y_scaler, inputs):
 
 def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None):
-    """
-    Plot Pareto front: API % (from pop) vs EFRF (from objectives).
-    With 5 objectives, the front will now show a spread in API.
-    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
-        # Extract API from population (first variable) and EFRF from objectives (third objective)
         api_vals = pop[front, 0]
         efrf_vals = objectives[front, 2]
     except Exception:
@@ -698,7 +699,7 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
                   annotation_text=f'API max ({SLIDER_API_MAX}%)')
     fig.update_layout(
-        title='Pareto Front – API vs EFRF Trade‑off (5 objectives)',
+        title='Pareto Front – API vs EFRF Trade‑off',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
@@ -760,6 +761,15 @@ def main():
                 friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
+        st.markdown("### ⚙️ API Objective Direction")
+        api_obj = st.radio(
+            "API Objective:",
+            options=["Maximize (Quality)", "Minimize (Cost)"],
+            index=0 if st.session_state.api_objective == "Maximize (Quality)" else 1,
+            key="api_objective_radio"
+        )
+        st.session_state.api_objective = api_obj
+
         st.markdown("### ⚙️ Balanced Score Weights")
         with st.container(border=True):
             st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
@@ -819,12 +829,13 @@ def main():
                     [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
                 ])
 
-                with st.spinner(f"Running NSGA‑II with 5 objectives (pop={NSGA_POP}, gens={NSGA_GENS})..."):
+                with st.spinner(f"Running NSGA‑II (API objective: {api_obj}) ..."):
                     nsga = NSGAIIOptimizer(
                         model, scaler, y_scaler, bounds,
                         pop=NSGA_POP, gens=NSGA_GENS,
                         granule_fixed=granule_fixed,
-                        granule_fixed_val=granule_use
+                        granule_fixed_val=granule_use,
+                        api_objective=api_obj
                     )
                     pop, objectives, fronts, violations = nsga.run()
 
@@ -854,15 +865,13 @@ def main():
                             'pressure': p,
                             'api': api_val,
                             'disintegration': dis,
-                            'score': d - 20*ef - 0.01*p + 0.1*api_val  # include API in balanced score
+                            'score': d - 20*ef - 0.01*p + 0.05*api_val  # balanced score includes API
                         })
 
-                    # Sort by balanced score
                     candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
                     balanced = candidates_sorted_bal[0]
                     balanced_solution = balanced['ind']
 
-                    # Quality: highest tensile, with minimum pressure gap
                     pressure_bal = balanced['pressure']
                     candidates_qual = [c for c in candidates if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF]
                     if not candidates_qual:
@@ -870,7 +879,6 @@ def main():
                     quality = max(candidates_qual, key=lambda x: x['tensile'])
                     quality_solution = quality['ind']
 
-                    # Cost: lowest pressure, with minimum gap from both balanced and quality
                     pressure_qual = quality['pressure']
                     candidates_cost = [c for c in candidates 
                                        if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
