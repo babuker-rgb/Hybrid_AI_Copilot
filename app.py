@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – with cached Pareto plots
+# FINAL – Strong penalties for ALL excipients
 # ================================================================
 
 import streamlit as st
@@ -273,7 +273,7 @@ def calculate_quality_score(density, tensile, efrf, api=None):
                 'weights': weights}
 
 # ================================================================
-# NSGA‑II OPTIMIZER – with strong binder penalty
+# NSGA‑II OPTIMIZER – strong penalties for ALL excipients
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model: HybridTabletModel, pop_size=50, generations=80):
@@ -322,7 +322,7 @@ class NSGAIIOptimizer:
         penalty_tensile = 0.5 * (1 - np.clip(tensile_norm, 0, 1))
         fitness[:, 1] += penalty_tensile
 
-        # --- Excipient penalties ---
+        # --- Excipient penalties (strong for all) ---
         binder = pop[:, 1]
         pvpp   = pop[:, 2]
         mgst   = pop[:, 3]
@@ -335,19 +335,20 @@ class NSGAIIOptimizer:
         min_mcc      = 1.0
         min_moisture = 0.5
 
-        # Strong penalty for binder (weight = 1.0)
-        penalty_weight_binder = 1.0
-        pen_binder = penalty_weight_binder * np.maximum(0, (min_binder - binder) / min_binder)
+        # Strong penalty for binder (weight 1.0)
+        pen_binder = 1.0 * np.maximum(0, (min_binder - binder) / min_binder)
 
-        # Mild penalties for other excipients (weight = 0.02)
-        penalty_weight_other = 0.02
-        pen_pvpp     = penalty_weight_other * np.maximum(0, (min_pvpp - pvpp) / min_pvpp)
-        pen_mgst     = penalty_weight_other * np.maximum(0, (min_mgst - mgst) / min_mgst)
-        pen_mcc      = penalty_weight_other * np.maximum(0, (min_mcc - mcc) / min_mcc)
-        pen_moisture = penalty_weight_other * np.maximum(0, (min_moisture - moisture) / min_moisture)
+        # Strong penalty for MCC (weight 1.0) – prevents zero MCC
+        pen_mcc = 1.0 * np.maximum(0, (min_mcc - mcc) / min_mcc)
 
-        # Add all penalties to the tensile objective
-        fitness[:, 1] += (pen_binder + pen_pvpp + pen_mgst + pen_mcc + pen_moisture)
+        # Moderate penalties for other excipients (weight 0.5)
+        weight_other = 0.5
+        pen_pvpp     = weight_other * np.maximum(0, (min_pvpp - pvpp) / min_pvpp)
+        pen_mgst     = weight_other * np.maximum(0, (min_mgst - mgst) / min_mgst)
+        pen_moisture = weight_other * np.maximum(0, (min_moisture - moisture) / min_moisture)
+
+        # Add all penalties to the tensile objective (so they affect dominance)
+        fitness[:, 1] += (pen_binder + pen_mcc + pen_pvpp + pen_mgst + pen_moisture)
 
         return fitness
 
@@ -526,7 +527,7 @@ class NSGAIIOptimizer:
             raise RuntimeError(f"Optimization failed: {e}") from e
 
 # ================================================================
-# UI RENDER FUNCTIONS
+# UI RENDER FUNCTIONS (unchanged)
 # ================================================================
 def render_sidebar():
     with st.sidebar:
@@ -772,7 +773,7 @@ def main():
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
 
-        # --- Display results (fresh run) ---
+        # --- Display results ---
         st.markdown("## 📊 Optimization Results")
         first = solutions[0]
         col1, col2, col3 = st.columns(3)
@@ -858,7 +859,6 @@ def main():
         """, unsafe_allow_html=True)
 
     elif st.session_state.optimization_complete and st.session_state.best_solutions:
-        # --- Cached results with full plots ---
         st.info("Showing cached results.")
         solutions = st.session_state.best_solutions
         golden = st.session_state.golden_solution
@@ -874,7 +874,6 @@ def main():
             st.dataframe(pd.DataFrame(solutions), use_container_width=True)
 
             st.markdown("### 📈 Pareto Front Analysis")
-            # API vs Tensile
             fig1 = go.Figure()
             fig1.add_trace(go.Scatter(
                 x=[s['API (%)'] for s in solutions],
@@ -901,7 +900,6 @@ def main():
             )
             st.plotly_chart(fig1, use_container_width=True)
 
-            # Density vs EFRF
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter(
                 x=[s['Density'] for s in solutions],
