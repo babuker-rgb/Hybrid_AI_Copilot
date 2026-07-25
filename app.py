@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# COMPLETE PRODUCTION CODE – FIXED CONSTRAINTS & DIVERSE FRONT
+# COMPLETE PRODUCTION CODE – FIXED NSGA‑II & DIVERSITY
 # ================================================================
 
 import streamlit as st
@@ -57,8 +57,8 @@ BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
 # ---- NSGA‑II parameters ----
-NSGA_POP = 60
-NSGA_GENS = 40
+NSGA_POP = 100                # increased for better diversity
+NSGA_GENS = 80                # increased for convergence
 HIDDEN_SIZE = 512
 
 # ---- Fallback training parameters (used if full model missing) ----
@@ -278,7 +278,7 @@ def generate_pinn_data(n_samples, random_state=42):
     particle_effect = 1.0 - 0.0005*(particle_size_raw - 50)
     particle_effect = np.clip(particle_effect, 0.8, 1.2)
     tensile = tensile_base * api_effect * binder_effect * mgst_effect * pvpp_effect * speed_effect * particle_effect
-    tensile = np.clip(tensile, 0.5, 8.5)   # no longer clipping to max 8.5? keep for physics, but we'll penalise above max later
+    tensile = np.clip(tensile, 0.5, 8.5)
 
     er_base = (1.8 + 0.3*(api_n - 85.0)/10.0 + 0.08*(speed_raw - 10.0)/30.0 - 0.1*(pressure_raw - 100.0)/150.0 + 0.02*(decompression_time_raw - 35.0)/30.0)
     er = er_base * (1.0 - 0.15*(D - 0.4))
@@ -377,12 +377,11 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER (with proper constraint penalties)
+# NSGA-II OPTIMIZER (with constraint-dominance & fixed crowding)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
-                 granule_fixed=True, granule_fixed_val=125.0,
-                 penalty_api=0.08, penalty_tensile=0.05, penalty_efrf=0.08):
+                 granule_fixed=True, granule_fixed_val=125.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -391,9 +390,6 @@ class NSGAIIOptimizer:
         self.generations = gens
         self.granule_fixed = granule_fixed
         self.granule_fixed_val = granule_fixed_val
-        self.penalty_api = penalty_api
-        self.penalty_tensile = penalty_tensile
-        self.penalty_efrf = penalty_efrf
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -456,7 +452,6 @@ class NSGAIIOptimizer:
             pred_scaled = self.model.predict(X_t)
             pred = self.y_scaler.inverse_transform(pred_scaled)
 
-        # Raw predictions (no clipping)
         density = pred[:, 0]
         tensile = pred[:, 1]
         er = pred[:, 2]
@@ -466,58 +461,35 @@ class NSGAIIOptimizer:
         # Compute EFRF
         efrf = er / np.maximum(tensile, 1e-4)
 
-        # ---- Penalties for constraint violations ----
-        penalty = np.zeros(n)
-
+        # ---- Constraint violations (positive values) ----
+        violation = np.zeros(n)
         # Density bounds
-        penalty += np.where(density < D_MIN, (D_MIN - density)**2, 0.0)
-        penalty += np.where(density > D_MAX, (density - D_MAX)**2, 0.0)
-
+        violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
         # Tensile minimum
-        penalty += np.where(tensile < TENSILE_MIN, (TENSILE_MIN - tensile)**2, 0.0)
-
+        violation += np.maximum(0, TENSILE_MIN - tensile)
         # EFRF maximum
-        penalty += np.where(efrf >= EFRF_MAX, (efrf - EFRF_MAX)**2, 0.0)
-
+        violation += np.maximum(0, efrf - EFRF_MAX)
         # Disintegration time maximum
-        penalty += np.where(disintegration > DISINTEGRATION_MAX, (disintegration - DISINTEGRATION_MAX)**2, 0.0)
-
+        violation += np.maximum(0, disintegration - DISINTEGRATION_MAX)
         # MCC bounds
         mcc_val = repaired[:, 1]
-        penalty += np.where(mcc_val < self.bounds[1,0], (mcc_val - self.bounds[1,0])**2, 0.0)
-        penalty += np.where(mcc_val > self.bounds[1,1], (mcc_val - self.bounds[1,1])**2, 0.0)
+        violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # ---- Objectives ----
-        # 1: maximize density -> minimize -density
-        # 2: maximize tensile -> minimize -tensile
-        # 3: minimize efrf -> minimize efrf
+        # ---- Objectives (maximize density, maximize tensile, minimize efrf) ----
         objectives = np.column_stack([
             -density,
             -tensile,
             efrf
         ])
 
-        # ---- Additional penalty for low API and low tensile (from Co-HYBAI) ----
-        api = repaired[:, 0]
-        api_norm = (api - 80) / 18
-        tensile_norm = tensile / 8.5
-        penalty_api_vec = self.penalty_api * (1 - api_norm)
-        penalty_tensile_vec = self.penalty_tensile * (1 - tensile_norm)
-        objectives[:, 0] += penalty_api_vec
-        objectives[:, 1] += penalty_tensile_vec
+        return objectives, repaired, violation
 
-        # ---- EFRF penalty (extra push) ----
-        efrf_penalty_vec = self.penalty_efrf * np.maximum(0, efrf - 0.40) ** 2
-        objectives[:, 2] += efrf_penalty_vec
-
-        # ---- Apply constraint penalties (large weight) ----
-        objectives[:, 0] += 100.0 * penalty
-        objectives[:, 1] += 100.0 * penalty
-        objectives[:, 2] += 100.0 * penalty
-
-        return objectives, repaired
-
-    def _non_dominated_sort(self, objectives):
+    def _non_dominated_sort(self, objectives, violations):
+        """Perform non-dominated sorting using constraint dominance.
+        If both have zero violation -> Pareto dominance.
+        If one feasible and other infeasible -> feasible dominates.
+        If both infeasible -> lower violation dominates.
+        """
         n = objectives.shape[0]
         fronts = []
         remaining = list(range(n))
@@ -528,12 +500,15 @@ class NSGAIIOptimizer:
                 for j in remaining:
                     if i == j:
                         continue
-                    if (objectives[j,0] <= objectives[i,0] and
-                        objectives[j,1] <= objectives[i,1] and
-                        objectives[j,2] <= objectives[i,2]) and \
-                       (objectives[j,0] < objectives[i,0] or
-                        objectives[j,1] < objectives[i,1] or
-                        objectives[j,2] < objectives[i,2]):
+                    # Check if j dominates i
+                    if (violations[j] < violations[i]) or \
+                       (violations[j] == 0 and violations[i] == 0 and
+                        (objectives[j,0] <= objectives[i,0] and
+                         objectives[j,1] <= objectives[i,1] and
+                         objectives[j,2] <= objectives[i,2]) and
+                        (objectives[j,0] < objectives[i,0] or
+                         objectives[j,1] < objectives[i,1] or
+                         objectives[j,2] < objectives[i,2])):
                         dominated = True
                         break
                 if not dominated:
@@ -543,19 +518,23 @@ class NSGAIIOptimizer:
         return fronts
 
     def _crowding_distance(self, objectives, front):
+        """Compute crowding distance for a front, return dict index->distance."""
         if len(front) <= 2:
-            return np.ones(len(front)) * np.inf
-        dist = np.zeros(len(front))
+            return {idx: np.inf for idx in front}
+        dist = {idx: 0.0 for idx in front}
         for obj_idx in range(objectives.shape[1]):
-            sorted_idx = sorted(front, key=lambda i: objectives[i, obj_idx])
-            dist[0] = np.inf
-            dist[-1] = np.inf
-            f_min = objectives[sorted_idx[0], obj_idx]
-            f_max = objectives[sorted_idx[-1], obj_idx]
+            # Sort front by objective
+            sorted_front = sorted(front, key=lambda i: objectives[i, obj_idx])
+            f_min = objectives[sorted_front[0], obj_idx]
+            f_max = objectives[sorted_front[-1], obj_idx]
             if f_max - f_min > 1e-10:
-                for k in range(1, len(sorted_idx)-1):
-                    dist[k] += (objectives[sorted_idx[k+1], obj_idx] -
-                                objectives[sorted_idx[k-1], obj_idx]) / (f_max - f_min)
+                for k in range(1, len(sorted_front)-1):
+                    dist[sorted_front[k]] += (objectives[sorted_front[k+1], obj_idx] -
+                                              objectives[sorted_front[k-1], obj_idx]) / (f_max - f_min)
+        # Set boundaries to inf
+        if len(sorted_front) > 0:
+            dist[sorted_front[0]] = np.inf
+            dist[sorted_front[-1]] = np.inf
         return dist
 
     def _crossover(self, p1, p2, eta=40):
@@ -583,9 +562,10 @@ class NSGAIIOptimizer:
                 child[i] = np.clip(child[i], self.bounds[i,0], self.bounds[i,1])
         return child
 
-    def _tournament(self, pop, objectives, fronts):
+    def _tournament(self, pop, objectives, violations, fronts, crowding_dist):
         idx1 = np.random.randint(0, len(pop))
         idx2 = np.random.randint(0, len(pop))
+        # Determine ranks
         rank1 = next((f for f, front in enumerate(fronts) if idx1 in front), len(fronts))
         rank2 = next((f for f, front in enumerate(fronts) if idx2 in front), len(fronts))
         if rank1 < rank2:
@@ -593,30 +573,22 @@ class NSGAIIOptimizer:
         elif rank2 < rank1:
             return pop[idx2]
         else:
-            front = fronts[rank1]
-            dist = self._crowding_distance(objectives, front)
-            d1 = dist[front.index(idx1)] if idx1 in front else 0
-            d2 = dist[front.index(idx2)] if idx2 in front else 0
+            # Same rank: use crowding distance
+            d1 = crowding_dist.get(idx1, 0)
+            d2 = crowding_dist.get(idx2, 0)
             return pop[idx1] if d1 > d2 else pop[idx2]
 
     def run(self):
         rng = np.random.default_rng()
+        # Initialize population
         pop = []
         for i in range(self.pop_size):
-            if i < 0.3 * self.pop_size:
-                api = rng.uniform(90, 95)
-                mcc = rng.uniform(2.5, 4.0)
-                binder = rng.uniform(3.5, 5.0)
-                pvpp = rng.uniform(2, 4)
-                mgst = rng.uniform(0.4, 0.8)
-                moisture = rng.uniform(1.0, 3.0)
-            else:
-                api = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX)
-                mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
-                binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX)
-                pvpp = rng.uniform(BOUND_PVPP_MIN, BOUND_PVPP_MAX)
-                mgst = rng.uniform(BOUND_MGST_MIN, BOUND_MGST_MAX)
-                moisture = rng.uniform(SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
+            api = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX)
+            mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
+            binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX)
+            pvpp = rng.uniform(BOUND_PVPP_MIN, BOUND_PVPP_MAX)
+            mgst = rng.uniform(BOUND_MGST_MIN, BOUND_MGST_MAX)
+            moisture = rng.uniform(SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
             pressure = rng.uniform(SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX)
             speed = rng.uniform(SLIDER_SPEED_MIN, SLIDER_SPEED_MAX)
             granule = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX)
@@ -631,12 +603,20 @@ class NSGAIIOptimizer:
         pop = np.array(pop)
 
         for gen in range(self.generations):
-            objectives, pop = self._evaluate(pop)
-            fronts = self._non_dominated_sort(objectives)
+            # Evaluate population
+            objectives, pop, violations = self._evaluate(pop)
+            fronts = self._non_dominated_sort(objectives, violations)
+            # Compute crowding distances for each front
+            crowding_dist = {}
+            for front in fronts:
+                dist = self._crowding_distance(objectives, front)
+                crowding_dist.update(dist)
+
+            # Generate offspring
             offspring = []
             while len(offspring) < self.pop_size:
-                p1 = self._tournament(pop, objectives, fronts)
-                p2 = self._tournament(pop, objectives, fronts)
+                p1 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
+                p2 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
                 c1, c2 = self._crossover(p1, p2)
                 c1 = self._mutate(c1)
                 c2 = self._mutate(c2)
@@ -644,9 +624,17 @@ class NSGAIIOptimizer:
                 if len(offspring) < self.pop_size:
                     offspring.append(self._repair(c2))
             offspring = np.array(offspring[:self.pop_size])
+
+            # Combine and select new population
             combined = np.vstack([pop, offspring])
-            obj_comb, _ = self._evaluate(combined)
-            fronts_comb = self._non_dominated_sort(obj_comb)
+            obj_comb, combined, viol_comb = self._evaluate(combined)
+            fronts_comb = self._non_dominated_sort(obj_comb, viol_comb)
+            # Compute crowding distances for combined
+            crowding_comb = {}
+            for front in fronts_comb:
+                dist = self._crowding_distance(obj_comb, front)
+                crowding_comb.update(dist)
+
             new_pop = []
             remaining = self.pop_size
             for front in fronts_comb:
@@ -654,16 +642,17 @@ class NSGAIIOptimizer:
                     new_pop.extend(combined[front])
                     remaining -= len(front)
                 else:
-                    dist = self._crowding_distance(obj_comb, front)
-                    sorted_idx = sorted(front, key=lambda i: dist[front.index(i)], reverse=True)
+                    # Sort by crowding distance descending
+                    sorted_idx = sorted(front, key=lambda i: crowding_comb.get(i, 0), reverse=True)
                     new_pop.extend(combined[sorted_idx[:remaining]])
                     remaining = 0
                     break
             pop = np.array(new_pop)
 
-        objectives, pop = self._evaluate(pop)
-        fronts = self._non_dominated_sort(objectives)
-        return pop, objectives, fronts
+        # Final evaluation
+        objectives, pop, violations = self._evaluate(pop)
+        fronts = self._non_dominated_sort(objectives, violations)
+        return pop, objectives, fronts, violations
 
 # ================================================================
 # PREDICTION AND PLOTTING FUNCTIONS
@@ -874,11 +863,12 @@ def main():
                 friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
-        st.markdown("### ⚙️ Penalty Adjustment")
+        st.markdown("### ⚙️ Penalty Adjustment (for balanced score)")
         with st.container(border=True):
-            penalty_api = st.slider("API Penalty", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
-            penalty_tensile = st.slider("Tensile Penalty", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
-            penalty_efrf = st.slider("EFRF Penalty", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
+            # These are now used only to compute balanced_score, not as penalties in NSGA-II
+            penalty_api = st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
+            penalty_tensile = st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
+            penalty_efrf = st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
 
         predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -957,19 +947,16 @@ def main():
                         model, scaler, y_scaler, bounds,
                         pop=NSGA_POP, gens=NSGA_GENS,
                         granule_fixed=granule_fixed,
-                        granule_fixed_val=granule if granule_fixed else 125.0,
-                        penalty_api=penalty_api,
-                        penalty_tensile=penalty_tensile,
-                        penalty_efrf=penalty_efrf
+                        granule_fixed_val=granule if granule_fixed else 125.0
                     )
-                    pop, objectives, fronts = nsga.run()
+                    pop, objectives, fronts, violations = nsga.run()
 
                 st.session_state.nsga_pop = pop
                 st.session_state.nsga_objectives = objectives
                 st.session_state.nsga_fronts = fronts
                 st.session_state.run_optimized = True
 
-                # ---- Extract 3 distinct solutions ----
+                # ---- Extract 3 distinct solutions from Pareto front ----
                 balanced_solution = None
                 quality_solution = None
                 cost_solution = None
@@ -977,97 +964,60 @@ def main():
                 if len(fronts) > 0 and len(fronts[0]) > 0:
                     front_indices = fronts[0]
                     n_front = len(front_indices)
+
                     if n_front >= 1:
+                        # Collect candidates with their attributes
                         candidates = []
                         for idx in front_indices:
                             ind = pop[idx]
                             api_val = -objectives[idx, 0]
+                            tensile_val = -objectives[idx, 1]  # because we minimize -tensile
                             efrf_val = objectives[idx, 2]
-                            _, t, _, _, _, _, _ = predict_pinn(model, scaler, y_scaler, ind)
                             pressure_val = ind[5]
+                            density_val = -objectives[idx, 0]  # same as api_val? Actually density is not directly from objectives; we need to compute from ind
+                            # Re-predict to get density, tensile, efrf accurately
+                            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, ind)
                             candidates.append({
                                 'idx': idx,
                                 'ind': ind,
                                 'api': api_val,
-                                'efrf': efrf_val,
                                 'tensile': t,
+                                'efrf': ef,
                                 'pressure': pressure_val,
-                                'balanced_score': api_val - efrf_val * 20,
-                                'quality_score': t,
-                                'cost_score': api_val - 0.05 * pressure_val
+                                'density': d,
+                                'disintegration': dis
                             })
 
-                        # Distance function (full 14‑D)
-                        ranges = np.array([
-                            SLIDER_API_MAX - SLIDER_API_MIN,
-                            SLIDER_MCC_MAX - SLIDER_MCC_MIN,
-                            SLIDER_PVPP_MAX - SLIDER_PVPP_MIN,
-                            SLIDER_MGST_MAX - SLIDER_MGST_MIN,
-                            SLIDER_BINDER_MAX - SLIDER_BINDER_MIN,
-                            SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN,
-                            SLIDER_SPEED_MAX - SLIDER_SPEED_MIN,
-                            SLIDER_GRANULE_MAX - SLIDER_GRANULE_MIN,
-                            SLIDER_PARTICLE_SIZE_MAX - SLIDER_PARTICLE_SIZE_MIN,
-                            SLIDER_MOISTURE_MAX - SLIDER_MOISTURE_MIN,
-                            len(BINDER_GRADES) - 1,
-                            SLIDER_DWELL_TIME_MAX - SLIDER_DWELL_TIME_MIN,
-                            SLIDER_FRICTION_MAX - SLIDER_FRICTION_MIN,
-                            SLIDER_DECOMPRESSION_TIME_MAX - SLIDER_DECOMPRESSION_TIME_MIN
-                        ])
-                        ranges[ranges == 0] = 1.0
+                        # Sort by balanced score: maximize API - 20*EFRF (you can adjust weights)
+                        candidates_sorted_bal = sorted(candidates, key=lambda x: x['api'] - 20*x['efrf'], reverse=True)
+                        balanced = candidates_sorted_bal[0]
+                        balanced_solution = balanced['ind']
 
-                        def full_distance(sol1, sol2):
-                            diff = (sol1 - sol2) / ranges
-                            return np.sqrt(np.sum(diff ** 2))
+                        # Quality: highest tensile
+                        candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
+                        quality = candidates_sorted_qual[0]
+                        # If quality is same as balanced, pick the second
+                        if quality['idx'] == balanced['idx'] and len(candidates_sorted_qual) > 1:
+                            quality = candidates_sorted_qual[1]
+                        quality_solution = quality['ind']
 
-                        # Balanced: best balanced score
-                        balanced_sorted = sorted(candidates, key=lambda x: x['balanced_score'], reverse=True)
-                        balanced_candidate = balanced_sorted[0]
-                        balanced_solution = balanced_candidate['ind']
-                        balanced_idx = balanced_candidate['idx']
-                        balanced_vec = balanced_solution.copy()
-
-                        # Quality: farthest from balanced
-                        quality_candidate = None
-                        max_dist = -1
-                        for c in candidates:
-                            if c['idx'] != balanced_idx:
-                                dist = full_distance(balanced_vec, c['ind'])
-                                if dist > max_dist or (dist == max_dist and c['tensile'] > (quality_candidate['tensile'] if quality_candidate else -1)):
-                                    max_dist = dist
-                                    quality_candidate = c
-                        if quality_candidate is None:
-                            quality_candidate = balanced_candidate
-                        quality_solution = quality_candidate['ind']
-                        quality_idx = quality_candidate['idx']
-                        quality_vec = quality_solution.copy()
-
-                        # Cost: farthest from both balanced and quality
-                        cost_candidate = None
-                        max_min_dist = -1
-                        for c in candidates:
-                            if c['idx'] != balanced_idx and c['idx'] != quality_idx:
-                                d1 = full_distance(balanced_vec, c['ind'])
-                                d2 = full_distance(quality_vec, c['ind'])
-                                min_dist = min(d1, d2)
-                                if min_dist > max_min_dist or (min_dist == max_min_dist and c['cost_score'] > (cost_candidate['cost_score'] if cost_candidate else -1)):
-                                    max_min_dist = min_dist
-                                    cost_candidate = c
-                        if cost_candidate is None:
-                            for c in candidates:
-                                if c['idx'] != balanced_idx and c['idx'] != quality_idx:
-                                    cost_candidate = c
+                        # Cost: lowest pressure (or highest API/pressure)
+                        candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])  # lowest pressure
+                        cost = candidates_sorted_cost[0]
+                        if cost['idx'] == balanced['idx'] or cost['idx'] == quality['idx']:
+                            # find next that is distinct
+                            for c in candidates_sorted_cost:
+                                if c['idx'] != balanced['idx'] and c['idx'] != quality['idx']:
+                                    cost = c
                                     break
-                        if cost_candidate is None:
-                            cost_candidate = balanced_candidate
-                        cost_solution = cost_candidate['ind']
+                        cost_solution = cost['ind']
 
                         # Store
                         st.session_state.balanced_solution = balanced_solution
                         st.session_state.quality_solution = quality_solution
                         st.session_state.cost_solution = cost_solution
 
-                # Store predictions
+                # Store predictions for each
                 if balanced_solution is not None:
                     d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
                     st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
