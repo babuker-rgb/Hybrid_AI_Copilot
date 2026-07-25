@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL PRODUCTION CODE – 4‑OBJECTIVE NSGA‑II + FIXED FALLBACK
+# FINAL PRODUCTION CODE – FIXED BOOLEAN CHECKS
 # ================================================================
 
 import streamlit as st
@@ -152,7 +152,7 @@ class MultiTaskPINN(nn.Module):
         self.res2 = ResidualBlock(hidden, dropout=0.05)
         self.res3 = ResidualBlock(hidden, dropout=0.05)
         self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh(), nn.Dropout(0.05))
-        self.output = nn.Linear(hidden//2, 6)   # 6 outputs: density, tensile, er, disintegration, tau, beta
+        self.output = nn.Linear(hidden//2, 6)
 
     def forward(self, X):
         x = self.input_layer(X)
@@ -325,7 +325,7 @@ def get_model():
     for epoch in range(FALLBACK_EPOCHS):
         model.train()
         optimizer.zero_grad()
-        y_pred = model(X_train_t)          # shape (batch, 6)
+        y_pred = model(X_train_t)
         loss = nn.MSELoss()(y_pred, y_train_t)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -428,7 +428,6 @@ class NSGAIIOptimizer:
         tensile = pred[:, 1]
         er = pred[:, 2]
         disintegration = pred[:, 3]
-        # dissolution_tau = pred[:, 4], dissolution_beta = pred[:, 5] – not used
 
         efrf = er / np.maximum(tensile, 1e-4)
         pressure = repaired[:, 5]
@@ -869,14 +868,14 @@ def main():
                     st.session_state.quality_solution = quality_solution
                     st.session_state.cost_solution = cost_solution
 
-                    # Store predictions
-                    if balanced_solution:
+                    # Store predictions - fixed boolean checks
+                    if balanced_solution is not None:
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
                         st.session_state.balanced_pred = (d, t, e, ef, dis)
-                    if quality_solution:
+                    if quality_solution is not None:
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, quality_solution)
                         st.session_state.quality_pred = (d, t, e, ef, dis)
-                    if cost_solution:
+                    if cost_solution is not None:
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, cost_solution)
                         st.session_state.cost_pred = (d, t, e, ef, dis)
 
