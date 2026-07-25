@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL PRODUCTION CODE – FIXED BOOLEAN CHECKS
+# FINAL – CLEAR PARETO FRONT (PRESSURE vs DENSITY)
 # ================================================================
 
 import streamlit as st
@@ -53,8 +53,8 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-NSGA_POP = 100
-NSGA_GENS = 80
+NSGA_POP = 120                  # increased for better front spread
+NSGA_GENS = 100
 HIDDEN_SIZE = 512
 
 FALLBACK_SAMPLES = 15000
@@ -221,7 +221,6 @@ def generate_pinn_data(n_samples, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations (same as original)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -296,7 +295,6 @@ def get_model():
     else:
         st.info("ℹ️ Pre-trained model not found. Training fallback model (this may take a few minutes)...")
 
-    # ---- Fallback training ----
     df, features = generate_pinn_data(FALLBACK_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
@@ -432,7 +430,6 @@ class NSGAIIOptimizer:
         efrf = er / np.maximum(tensile, 1e-4)
         pressure = repaired[:, 5]
 
-        # Constraint violations
         violation = np.zeros(n)
         violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
         violation += np.maximum(0, TENSILE_MIN - tensile)
@@ -441,7 +438,6 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # 4 objectives: maximize density, maximize tensile, minimize efrf, minimize pressure
         objectives = np.column_stack([
             -density,
             -tensile,
@@ -633,29 +629,33 @@ def predict_pinn(model, scaler, y_scaler, inputs):
 
 def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None):
+    """
+    Plot Pareto front showing Pressure vs Density – clear cost/quality trade-off.
+    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
+        # objectives: [ -density, -tensile, efrf, pressure ]
         pressure_vals = objectives[front, 3]
-        efrf_vals = objectives[front, 2]
+        density_vals = -objectives[front, 0]       # recover density
     except Exception:
         return None
 
     sorted_idx = np.argsort(pressure_vals)
     pressure_vals = pressure_vals[sorted_idx]
-    efrf_vals = efrf_vals[sorted_idx]
+    density_vals = density_vals[sorted_idx]
 
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
         x=pressure_vals,
-        y=efrf_vals,
+        y=density_vals,
         mode='lines+markers',
-        name='Pareto Front (Pressure vs EFRF)',
+        name='Pareto Front (Pressure vs Density)',
         line=dict(color='red', width=2),
         marker=dict(size=7, color='red'),
-        hovertemplate='Pressure: %{x:.1f} MPa<br>EFRF: %{y:.4f}<extra></extra>'
+        hovertemplate='Pressure: %{x:.1f} MPa<br>Density: %{y:.3f}<extra></extra>'
     ))
 
     def add_solution(solution, label, color, symbol):
@@ -664,11 +664,11 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
             p = solution[5]
             fig.add_trace(go.Scatter(
                 x=[p],
-                y=[ef],
+                y=[d],
                 mode='markers',
                 name=label,
                 marker=dict(size=14, color=color, symbol=symbol, line=dict(width=1, color='black')),
-                hovertemplate=f'{label}<br>Pressure: {p:.1f} MPa<br>EFRF: {ef:.4f}<extra></extra>'
+                hovertemplate=f'{label}<br>Pressure: {p:.1f} MPa<br>Density: {d:.3f}<extra></extra>'
             ))
 
     add_solution(balanced_solution, '⚖️ Balanced', 'gold', 'star')
@@ -676,21 +676,24 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
     if tested_point is not None and len(tested_point) >= 2:
+        # tested_point: (pressure, density)
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
             mode='markers',
             name='Tested Formulation',
             marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
-            hovertemplate='Tested: Pressure %{x:.1f} MPa, EFRF %{y:.4f}<extra></extra>'
+            hovertemplate='Tested: Pressure %{x:.1f} MPa, Density %{y:.3f}<extra></extra>'
         ))
 
-    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
-                  annotation_text='EFRF threshold (0.40)')
+    fig.add_hline(y=D_MIN, line_dash='dash', line_color='gray',
+                  annotation_text=f'Density min ({D_MIN})')
+    fig.add_hline(y=D_MAX, line_dash='dash', line_color='gray',
+                  annotation_text=f'Density max ({D_MAX})')
     fig.update_layout(
-        title='Pareto Front – Pressure vs EFRF Trade‑off',
+        title='Pareto Front – Pressure vs Density Trade‑off',
         xaxis_title='Pressure (MPa)',
-        yaxis_title='EFRF',
+        yaxis_title='Density',
         height=450,
         template='plotly_white',
         legend=dict(x=0.8, y=0.95)
@@ -752,9 +755,9 @@ def main():
 
         st.markdown("### ⚙️ Balanced Score Weights")
         with st.container(border=True):
-            penalty_api = st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
-            penalty_tensile = st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
-            penalty_efrf = st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
+            st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
+            st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
+            st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
 
         predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -842,19 +845,16 @@ def main():
                             'score': d - 20*ef - 0.01*p
                         })
 
-                    # Balanced: best score
                     candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
                     balanced = candidates_sorted_bal[0]
                     balanced_solution = balanced['ind']
 
-                    # Quality: highest tensile
                     candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
                     quality = candidates_sorted_qual[0]
                     if quality['idx'] == balanced['idx'] and len(candidates_sorted_qual) > 1:
                         quality = candidates_sorted_qual[1]
                     quality_solution = quality['ind']
 
-                    # Cost: lowest pressure
                     candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
                     cost = candidates_sorted_cost[0]
                     if cost['idx'] == balanced['idx'] or cost['idx'] == quality['idx']:
@@ -868,7 +868,6 @@ def main():
                     st.session_state.quality_solution = quality_solution
                     st.session_state.cost_solution = cost_solution
 
-                    # Store predictions - fixed boolean checks
                     if balanced_solution is not None:
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
                         st.session_state.balanced_pred = (d, t, e, ef, dis)
@@ -880,7 +879,7 @@ def main():
                         st.session_state.cost_pred = (d, t, e, ef, dis)
 
                 # ---- Show Pareto Front ----
-                st.markdown("### 📉 Pareto Front – Pressure vs EFRF")
+                st.markdown("### 📉 Pareto Front – Pressure vs Density")
                 if fronts is not None and len(fronts[0]) > 0:
                     st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
                     fig = plot_pareto_front(
@@ -889,7 +888,7 @@ def main():
                         quality_solution=quality_solution,
                         cost_solution=cost_solution,
                         model=model, scaler=scaler, y_scaler=y_scaler,
-                        tested_point=(pressure, efrf) if constraints_ok else None
+                        tested_point=(pressure, density) if constraints_ok else None
                     )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
