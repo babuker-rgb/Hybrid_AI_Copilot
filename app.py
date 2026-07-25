@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – FORCED DISTINCT SOLUTIONS
+# FINAL – PARETO FRONT: API vs EFRF
 # ================================================================
 
 import streamlit as st
@@ -628,47 +628,48 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
-def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_solution=None, cost_solution=None,
+def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None):
     """
-    Plot Pareto front showing Pressure vs Density – clear cost/quality trade-off.
+    Plot Pareto front: API % (from pop) vs EFRF (from objectives).
     """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
-        pressure_vals = objectives[front, 3]
-        density_vals = -objectives[front, 0]
+        # Extract API from population and EFRF from objectives
+        api_vals = pop[front, 0]          # API is the first variable
+        efrf_vals = objectives[front, 2]  # EFRF is third objective
     except Exception:
         return None
 
-    sorted_idx = np.argsort(pressure_vals)
-    pressure_vals = pressure_vals[sorted_idx]
-    density_vals = density_vals[sorted_idx]
+    sorted_idx = np.argsort(api_vals)
+    api_vals = api_vals[sorted_idx]
+    efrf_vals = efrf_vals[sorted_idx]
 
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
-        x=pressure_vals,
-        y=density_vals,
+        x=api_vals,
+        y=efrf_vals,
         mode='lines+markers',
-        name='Pareto Front (Pressure vs Density)',
+        name='Pareto Front (API vs EFRF)',
         line=dict(color='red', width=2),
         marker=dict(size=7, color='red'),
-        hovertemplate='Pressure: %{x:.1f} MPa<br>Density: %{y:.3f}<extra></extra>'
+        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
     ))
 
     def add_solution(solution, label, color, symbol):
         if solution is not None:
+            api = solution[0]
             d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
-            p = solution[5]
             fig.add_trace(go.Scatter(
-                x=[p],
-                y=[d],
+                x=[api],
+                y=[ef],
                 mode='markers',
                 name=label,
                 marker=dict(size=14, color=color, symbol=symbol, line=dict(width=1, color='black')),
-                hovertemplate=f'{label}<br>Pressure: {p:.1f} MPa<br>Density: {d:.3f}<extra></extra>'
+                hovertemplate=f'{label}<br>API: {api:.1f}%<br>EFRF: {ef:.4f}<extra></extra>'
             ))
 
     add_solution(balanced_solution, '⚖️ Balanced', 'gold', 'star')
@@ -676,23 +677,26 @@ def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_soluti
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
     if tested_point is not None and len(tested_point) >= 2:
+        # tested_point: (api, efrf) from initial prediction
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
             mode='markers',
             name='Tested Formulation',
             marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
-            hovertemplate='Tested: Pressure %{x:.1f} MPa, Density %{y:.3f}<extra></extra>'
+            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
 
-    fig.add_hline(y=D_MIN, line_dash='dash', line_color='gray',
-                  annotation_text=f'Density min ({D_MIN})')
-    fig.add_hline(y=D_MAX, line_dash='dash', line_color='gray',
-                  annotation_text=f'Density max ({D_MAX})')
+    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
+                  annotation_text='EFRF threshold (0.40)')
+    fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
+                  annotation_text=f'API min ({SLIDER_API_MIN}%)')
+    fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
+                  annotation_text=f'API max ({SLIDER_API_MAX}%)')
     fig.update_layout(
-        title='Pareto Front – Pressure vs Density Trade‑off',
-        xaxis_title='Pressure (MPa)',
-        yaxis_title='Density',
+        title='Pareto Front – API vs EFRF Trade‑off',
+        xaxis_title='API (%)',
+        yaxis_title='EFRF',
         height=450,
         template='plotly_white',
         legend=dict(x=0.8, y=0.95)
@@ -852,17 +856,15 @@ def main():
                     balanced = candidates_sorted_bal[0]
                     balanced_solution = balanced['ind']
 
-                    # ---- Quality: highest tensile, but with a minimum pressure gap from balanced ----
-                    # Filter candidates with pressure >= balanced.pressure + MIN_PRESSURE_DIFF
+                    # Quality: highest tensile, with minimum pressure gap
                     pressure_bal = balanced['pressure']
                     candidates_qual = [c for c in candidates if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF]
                     if not candidates_qual:
-                        # If none, take the one farthest in pressure
                         candidates_qual = sorted(candidates, key=lambda c: abs(c['pressure'] - pressure_bal), reverse=True)
                     quality = max(candidates_qual, key=lambda x: x['tensile'])
                     quality_solution = quality['ind']
 
-                    # ---- Cost: lowest pressure, but with a minimum pressure gap from both balanced and quality ----
+                    # Cost: lowest pressure, with minimum gap from both balanced and quality
                     pressure_qual = quality['pressure']
                     candidates_cost = [c for c in candidates 
                                        if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
@@ -888,16 +890,16 @@ def main():
                         st.session_state.cost_pred = (d, t, e, ef, dis)
 
                 # ---- Show Pareto Front ----
-                st.markdown("### 📉 Pareto Front – Pressure vs Density")
+                st.markdown("### 📉 Pareto Front – API vs EFRF")
                 if fronts is not None and len(fronts[0]) > 0:
                     st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
                     fig = plot_pareto_front(
-                        objectives, fronts,
+                        objectives, fronts, pop,
                         balanced_solution=balanced_solution,
                         quality_solution=quality_solution,
                         cost_solution=cost_solution,
                         model=model, scaler=scaler, y_scaler=y_scaler,
-                        tested_point=(pressure, density) if constraints_ok else None
+                        tested_point=(api_n, efrf) if constraints_ok else None
                     )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
