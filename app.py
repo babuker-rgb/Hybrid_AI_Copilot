@@ -348,13 +348,28 @@ class NSGAIIOptimizer:
         self.n_objectives = 3  # Density, Tensile, EFRF
 
     def enforce_mass_balance(self, pop):
+        # BUGFIX: this previously only rescaled the six formulation
+        # components to sum to 100% and clipped the result to a blanket
+        # [0, 100] — it never enforced each component's own realistic
+        # bound (API 80-98%, binder 1.4-6%, etc.). Combined with the
+        # uncapped API reward in evaluate() below, this let NSGA-II drift
+        # to degenerate formulations like API=100% / binder=PVPP=MgSt=
+        # MCC=moisture=0% — outside every stated bound and not a real
+        # tablet formulation (no binder, no disintegrant, no lubricant).
+        # Fixed with a two-pass clip-then-renormalize (clip to each
+        # component's bound, rescale to 100, clip again, rescale again),
+        # the same approach used for the analogous fix in the other two
+        # app reviews.
         balanced = pop.copy()
-        for i in range(len(pop)):
-            f = pop[i, :6]
-            total = np.sum(f)
-            if total > 0:
-                norm = (f / total) * 100
-                balanced[i, :6] = np.clip(norm, 0, 100)
+        lo = np.array([b[0] for b in self.GENE_BOUNDS[:6]])
+        hi = np.array([b[1] for b in self.GENE_BOUNDS[:6]])
+        f = np.clip(pop[:, :6], lo, hi)
+        total = f.sum(axis=1, keepdims=True)
+        total = np.where(total <= 0, 1.0, total)
+        norm = np.clip((f / total) * 100.0, lo, hi)
+        total2 = norm.sum(axis=1, keepdims=True)
+        total2 = np.where(total2 <= 0, 1.0, total2)
+        balanced[:, :6] = np.clip(norm * (100.0 / total2), lo, hi)
         return balanced
 
     def evaluate(self, pop):
@@ -380,8 +395,16 @@ class NSGAIIOptimizer:
 
         # 🚀 SLIGHT IMPROVEMENT: Penalise low API% AND low Tensile.
         # This gently pushes the optimizer to find solutions with both higher drug load and higher mechanical strength.
-        api_norm = (api - 80) / 18               # 0→80%, 1→98%
-        tensile_norm = tensile / 8.5              # Normalize to ~0-1 (max theoretical)
+        # BUGFIX: api_norm was uncapped — once API exceeded 98% (which
+        # enforce_mass_balance now prevents, but this is a defensive
+        # second layer) it would push api_norm above 1.0, making
+        # penalty_api go NEGATIVE. Since fitness is minimized, a negative
+        # penalty acts as an unbounded reward for pushing API arbitrarily
+        # high, which is exactly what produced the degenerate 100%-API
+        # "golden solution". Clipped to [0, 1] so the reward saturates at
+        # the real upper bound instead of running away past it.
+        api_norm = np.clip((api - 80) / 18, 0.0, 1.0)               # 0→80%, 1→98%
+        tensile_norm = np.clip(tensile / 8.5, 0.0, 1.0)              # Normalize to ~0-1 (max theoretical)
 
         penalty_api = 0.08 * (1 - api_norm)       # max 0.08 when API=80%
         penalty_tensile = 0.05 * (1 - tensile_norm) # max 0.05 when tensile=0
