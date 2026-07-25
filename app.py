@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – Strong binder penalty to enforce minimum binder
+# FINAL – with cached Pareto plots
 # ================================================================
 
 import streamlit as st
@@ -526,7 +526,7 @@ class NSGAIIOptimizer:
             raise RuntimeError(f"Optimization failed: {e}") from e
 
 # ================================================================
-# UI RENDER FUNCTIONS (unchanged)
+# UI RENDER FUNCTIONS
 # ================================================================
 def render_sidebar():
     with st.sidebar:
@@ -772,9 +772,7 @@ def main():
         st.success(f"⏱️ Optimization completed in {st.session_state.runtime} seconds!")
         st.balloons()
 
-        # ============================================================
-        # DISPLAY RESULTS
-        # ============================================================
+        # --- Display results (fresh run) ---
         st.markdown("## 📊 Optimization Results")
         first = solutions[0]
         col1, col2, col3 = st.columns(3)
@@ -860,8 +858,98 @@ def main():
         """, unsafe_allow_html=True)
 
     elif st.session_state.optimization_complete and st.session_state.best_solutions:
+        # --- Cached results with full plots ---
         st.info("Showing cached results.")
-        st.dataframe(pd.DataFrame(st.session_state.best_solutions), use_container_width=True)
+        solutions = st.session_state.best_solutions
+        golden = st.session_state.golden_solution
+
+        if golden:
+            st.markdown("## 📊 Optimization Results")
+            first = solutions[0]
+            col1, col2, col3 = st.columns(3)
+            col1.metric("API%", f"{first['API (%)']:.1f}%")
+            col2.metric("Tensile", f"{first['Tensile (MPa)']:.2f} MPa")
+            col3.metric("Quality Score", f"{first['Quality Score']:.1f}%")
+
+            st.dataframe(pd.DataFrame(solutions), use_container_width=True)
+
+            st.markdown("### 📈 Pareto Front Analysis")
+            # API vs Tensile
+            fig1 = go.Figure()
+            fig1.add_trace(go.Scatter(
+                x=[s['API (%)'] for s in solutions],
+                y=[s['Tensile (MPa)'] for s in solutions],
+                mode='markers',
+                marker=dict(size=10, color='blue', opacity=0.6),
+                name='Pareto solutions',
+                hovertemplate='API: %{x:.1f}%<br>Tensile: %{y:.2f} MPa<extra></extra>'
+            ))
+            fig1.add_trace(go.Scatter(
+                x=[golden['API (%)']],
+                y=[golden['Tensile (MPa)']],
+                mode='markers',
+                marker=dict(size=18, color='red', symbol='star', line=dict(width=2, color='white')),
+                name='🏆 Golden',
+                hovertemplate='<b>GOLDEN</b><br>API: %{x:.1f}%<br>Tensile: %{y:.2f} MPa<extra></extra>'
+            ))
+            fig1.update_layout(
+                title='API% vs Tensile Strength',
+                xaxis_title='API (%)',
+                yaxis_title='Tensile (MPa)',
+                height=400,
+                margin=dict(l=40, r=40, t=40, b=40)
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+
+            # Density vs EFRF
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(
+                x=[s['Density'] for s in solutions],
+                y=[s['EFRF'] for s in solutions],
+                mode='markers',
+                marker=dict(size=10, color='green', opacity=0.6),
+                name='Pareto solutions',
+                hovertemplate='Density: %{x:.3f}<br>EFRF: %{y:.3f}<extra></extra>'
+            ))
+            fig2.add_trace(go.Scatter(
+                x=[golden['Density']],
+                y=[golden['EFRF']],
+                mode='markers',
+                marker=dict(size=18, color='red', symbol='star', line=dict(width=2, color='white')),
+                name='🏆 Golden',
+                hovertemplate='<b>GOLDEN</b><br>Density: %{x:.3f}<br>EFRF: %{y:.3f}<extra></extra>'
+            ))
+            fig2.update_layout(
+                title='Density vs EFRF',
+                xaxis_title='Density',
+                yaxis_title='EFRF',
+                height=400,
+                margin=dict(l=40, r=40, t=40, b=40)
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+            st.markdown("### 🏆 Golden Balanced Optimum")
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        padding: 20px; border-radius: 12px; color: white; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+                <h3 style="color: white;">✨ Optimal Formulation</h3>
+                <p><b>API:</b> {golden['API (%)']:.1f}% &nbsp;|&nbsp;
+                   <b>Binder:</b> {golden['Binder (%)']:.1f}% &nbsp;|&nbsp;
+                   <b>PVPP:</b> {golden['PVPP (%)']:.1f}% &nbsp;|&nbsp;
+                   <b>MgSt:</b> {golden['MgSt (%)']:.2f}% &nbsp;|&nbsp;
+                   <b>MCC:</b> {golden['MCC (%)']:.1f}% &nbsp;|&nbsp;
+                   <b>Moisture:</b> {golden['Moisture (%)']:.1f}%</p>
+                <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 10px;">
+                    <div><b>Density:</b> {golden['Density']:.3f} ✅</div>
+                    <div><b>Tensile:</b> {golden['Tensile (MPa)']:.2f} MPa ✅</div>
+                    <div><b>EFRF:</b> {golden['EFRF']:.3f} ✅</div>
+                    <div><b>Quality Score:</b> {golden['Quality Score']:.1f}% 🏆</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("No golden solution available.")
+
     else:
         st.info("👆 Adjust parameters and click 'Run Hybrid Optimization' to begin.")
         st.markdown("---")
