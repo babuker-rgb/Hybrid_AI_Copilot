@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# COMPLETE PRODUCTION CODE – FIXED PLOT & SELECTION
+# COMPLETE PRODUCTION CODE – 4‑OBJECTIVE NSGA‑II & CLEAR FRONT
 # ================================================================
 
 import streamlit as st
@@ -16,8 +16,6 @@ from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import plotly.express as px
 import plotly.graph_objects as go
 import os
-import tempfile
-import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -31,7 +29,7 @@ st.set_page_config(page_title="Hybrid AI · Tablet Optimization v29.28‑R32", l
 # ================================================================
 D_MIN, D_MAX = 0.72, 0.99
 TENSILE_MIN = 1.50
-EFRF_MAX = 0.40               # strict threshold for feasibility
+EFRF_MAX = 0.40
 DISINTEGRATION_MAX = 15.0
 
 SLIDER_API_MIN, SLIDER_API_MAX = 80.0, 98.0
@@ -61,7 +59,7 @@ NSGA_POP = 100
 NSGA_GENS = 80
 HIDDEN_SIZE = 512
 
-# ---- Fallback training parameters ----
+# ---- Fallback training ----
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
@@ -77,15 +75,9 @@ if 'api' not in st.session_state:
         'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
         'show_cost_solution': True,
         'show_quality_solution': True,
-        'show_comparison': False,
-        'show_sensitivity': False,
-        'show_dissolution': False,
-        'run_optimized': False, 'formulation': None,
-        'feasible_df': None, 'tested_point': None, 'benchmark_df': None,
-        'nsga_pop': None, 'nsga_objectives': None, 'nsga_fronts': None,
+        'run_optimized': False,
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
-        'experimental_data': None, 'runtime': 0
     })
 
 # ================================================================
@@ -123,26 +115,6 @@ def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
     moisture_effect = -0.1 * moisture_n
     time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
     return np.clip(time, 1.0, 30.0)
-
-def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
-    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
-    tau = np.clip(tau, 2.0, 20.0)
-    beta = 1.0 + 0.01 * (particle_size - 50) / 50
-    beta = np.clip(beta, 0.8, 2.5)
-    return tau, beta
-
-def calculate_quality_score(density, tensile, efrf, api=None):
-    density_score = min(100, (density / 0.95) * 100)
-    tensile_score = min(100, (tensile / 8.5) * 100)
-    efrf_score = max(0, (1 - efrf) * 100)
-    weights = {'density': 0.4, 'tensile': 0.3, 'efrf': 0.3}
-    overall = (density_score * weights['density'] +
-               tensile_score * weights['tensile'] +
-               efrf_score * weights['efrf'])
-    if api is not None:
-        api_score = (api - 80) / 18 * 100
-        overall = 0.7 * overall + 0.3 * api_score
-    return overall
 
 # ================================================================
 # PINN MODEL
@@ -197,7 +169,7 @@ class MultiTaskPINN(nn.Module):
             return output.cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (for fallback training)
+# DATA GENERATION (for fallback training) – kept as original
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -246,7 +218,7 @@ def generate_pinn_data(n_samples, random_state=42):
         'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
     ]
 
-    # Physics simulations (full implementation)
+    # Physics simulations (simplified but reasonable)
     k_heckel = 0.025 + 0.0001 * pressure_raw
     A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
     D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
@@ -286,17 +258,12 @@ def generate_pinn_data(n_samples, random_state=42):
 
     disintegration = predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n)
     disintegration = np.clip(disintegration, 1.0, 30.0)
-    tau, beta = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
-    tau = np.clip(tau, 2.0, 20.0)
-    beta = np.clip(beta, 0.8, 2.5)
 
     df = pd.DataFrame(X_enhanced, columns=feature_names)
     df['Density'] = D
     df['Tensile_Strength_MPa'] = tensile
     df['Elastic_Recovery_%'] = er
     df['Disintegration_Time_min'] = disintegration
-    df['Dissolution_Tau'] = tau
-    df['Dissolution_Beta'] = beta
     return df, feature_names
 
 # ================================================================
@@ -327,7 +294,7 @@ def get_model():
     df, features = generate_pinn_data(N_SAMPLES)
     X_raw = df[features].values
     y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
-            'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
+            'Disintegration_Time_min']].values   # only 4 outputs now (drop dissolution)
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_raw)
@@ -363,7 +330,6 @@ def get_model():
     progress_bar.empty()
     status_text.empty()
 
-    # Evaluate final model
     model.eval()
     with torch.no_grad():
         val_pred = model(X_test_t).cpu().numpy()
@@ -377,7 +343,7 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER (with constraint-dominance & fixed crowding)
+# NSGA-II OPTIMIZER – 4 OBJECTIVES (density, tensile, efrf, pressure)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -456,40 +422,30 @@ class NSGAIIOptimizer:
         tensile = pred[:, 1]
         er = pred[:, 2]
         disintegration = pred[:, 3]
-        dissolution_tau = pred[:, 4]
 
-        # Compute EFRF
         efrf = er / np.maximum(tensile, 1e-4)
+        pressure = repaired[:, 5]   # pressure is the 6th variable (index 5)
 
-        # ---- Constraint violations (positive values) ----
+        # Constraint violations
         violation = np.zeros(n)
-        # Density bounds
         violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
-        # Tensile minimum
         violation += np.maximum(0, TENSILE_MIN - tensile)
-        # EFRF maximum
         violation += np.maximum(0, efrf - EFRF_MAX)
-        # Disintegration time maximum
         violation += np.maximum(0, disintegration - DISINTEGRATION_MAX)
-        # MCC bounds
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # ---- Objectives (maximize density, maximize tensile, minimize efrf) ----
+        # 4 objectives: maximize density, maximize tensile, minimize efrf, minimize pressure
         objectives = np.column_stack([
-            -density,
-            -tensile,
-            efrf
+            -density,          # minimize -density => maximize density
+            -tensile,          # minimize -tensile => maximize tensile
+            efrf,              # minimize efrf
+            pressure           # minimize pressure (cost)
         ])
 
         return objectives, repaired, violation
 
     def _non_dominated_sort(self, objectives, violations):
-        """Perform non-dominated sorting using constraint dominance.
-        If both have zero violation -> Pareto dominance.
-        If one feasible and other infeasible -> feasible dominates.
-        If both infeasible -> lower violation dominates.
-        """
         n = objectives.shape[0]
         fronts = []
         remaining = list(range(n))
@@ -500,15 +456,11 @@ class NSGAIIOptimizer:
                 for j in remaining:
                     if i == j:
                         continue
-                    # Check if j dominates i
+                    # Constraint dominance: if j has lower violation, or both feasible and j dominates i
                     if (violations[j] < violations[i]) or \
                        (violations[j] == 0 and violations[i] == 0 and
-                        (objectives[j,0] <= objectives[i,0] and
-                         objectives[j,1] <= objectives[i,1] and
-                         objectives[j,2] <= objectives[i,2]) and
-                        (objectives[j,0] < objectives[i,0] or
-                         objectives[j,1] < objectives[i,1] or
-                         objectives[j,2] < objectives[i,2])):
+                        np.all(objectives[j] <= objectives[i]) and
+                        np.any(objectives[j] < objectives[i])):
                         dominated = True
                         break
                 if not dominated:
@@ -518,12 +470,10 @@ class NSGAIIOptimizer:
         return fronts
 
     def _crowding_distance(self, objectives, front):
-        """Compute crowding distance for a front, return dict index->distance."""
         if len(front) <= 2:
             return {idx: np.inf for idx in front}
         dist = {idx: 0.0 for idx in front}
         for obj_idx in range(objectives.shape[1]):
-            # Sort front by objective
             sorted_front = sorted(front, key=lambda i: objectives[i, obj_idx])
             f_min = objectives[sorted_front[0], obj_idx]
             f_max = objectives[sorted_front[-1], obj_idx]
@@ -531,10 +481,8 @@ class NSGAIIOptimizer:
                 for k in range(1, len(sorted_front)-1):
                     dist[sorted_front[k]] += (objectives[sorted_front[k+1], obj_idx] -
                                               objectives[sorted_front[k-1], obj_idx]) / (f_max - f_min)
-        # Set boundaries to inf
-        if len(sorted_front) > 0:
-            dist[sorted_front[0]] = np.inf
-            dist[sorted_front[-1]] = np.inf
+        dist[sorted_front[0]] = np.inf
+        dist[sorted_front[-1]] = np.inf
         return dist
 
     def _crossover(self, p1, p2, eta=40):
@@ -565,7 +513,6 @@ class NSGAIIOptimizer:
     def _tournament(self, pop, objectives, violations, fronts, crowding_dist):
         idx1 = np.random.randint(0, len(pop))
         idx2 = np.random.randint(0, len(pop))
-        # Determine ranks
         rank1 = next((f for f, front in enumerate(fronts) if idx1 in front), len(fronts))
         rank2 = next((f for f, front in enumerate(fronts) if idx2 in front), len(fronts))
         if rank1 < rank2:
@@ -573,16 +520,14 @@ class NSGAIIOptimizer:
         elif rank2 < rank1:
             return pop[idx2]
         else:
-            # Same rank: use crowding distance
             d1 = crowding_dist.get(idx1, 0)
             d2 = crowding_dist.get(idx2, 0)
             return pop[idx1] if d1 > d2 else pop[idx2]
 
     def run(self):
         rng = np.random.default_rng()
-        # Initialize population
         pop = []
-        for i in range(self.pop_size):
+        for _ in range(self.pop_size):
             api = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX)
             mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
             binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX)
@@ -603,16 +548,13 @@ class NSGAIIOptimizer:
         pop = np.array(pop)
 
         for gen in range(self.generations):
-            # Evaluate population
             objectives, pop, violations = self._evaluate(pop)
             fronts = self._non_dominated_sort(objectives, violations)
-            # Compute crowding distances for each front
             crowding_dist = {}
             for front in fronts:
                 dist = self._crowding_distance(objectives, front)
                 crowding_dist.update(dist)
 
-            # Generate offspring
             offspring = []
             while len(offspring) < self.pop_size:
                 p1 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
@@ -625,11 +567,9 @@ class NSGAIIOptimizer:
                     offspring.append(self._repair(c2))
             offspring = np.array(offspring[:self.pop_size])
 
-            # Combine and select new population
             combined = np.vstack([pop, offspring])
             obj_comb, combined, viol_comb = self._evaluate(combined)
             fronts_comb = self._non_dominated_sort(obj_comb, viol_comb)
-            # Compute crowding distances for combined
             crowding_comb = {}
             for front in fronts_comb:
                 dist = self._crowding_distance(obj_comb, front)
@@ -642,14 +582,12 @@ class NSGAIIOptimizer:
                     new_pop.extend(combined[front])
                     remaining -= len(front)
                 else:
-                    # Sort by crowding distance descending
                     sorted_idx = sorted(front, key=lambda i: crowding_comb.get(i, 0), reverse=True)
                     new_pop.extend(combined[sorted_idx[:remaining]])
                     remaining = 0
                     break
             pop = np.array(new_pop)
 
-        # Final evaluation
         objectives, pop, violations = self._evaluate(pop)
         fronts = self._non_dominated_sort(objectives, violations)
         return pop, objectives, fronts, violations
@@ -659,7 +597,7 @@ class NSGAIIOptimizer:
 # ================================================================
 def predict_pinn(model, scaler, y_scaler, inputs):
     if model is None:
-        return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
+        return 0.72, 2.0, 0.5, 0.25, 10.0
     try:
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = inputs
         api_binder = api * binder
@@ -682,146 +620,82 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         er = max(pred[2], 1e-4)
         efrf = er / tensile
         disintegration = max(pred[3], 0.5)
-        dissolution_tau = max(pred[4], 1.0)
-        dissolution_beta = max(pred[5], 0.5)
-        return density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta
+        return density, tensile, er, efrf, disintegration
     except Exception as e:
         st.error(f"Prediction error: {e}")
-        return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
+        return 0.72, 2.0, 0.5, 0.25, 10.0
 
-def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
-    if model is None:
-        return pd.DataFrame()
-    rng = np.random.default_rng(42)
-    api = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
-    binder = rng.uniform(SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, n_samples)
-    pvpp = rng.uniform(SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, n_samples)
-    mgst = rng.uniform(SLIDER_MGST_MIN, SLIDER_MGST_MAX, n_samples)
-    mcc = rng.uniform(SLIDER_MCC_MIN, SLIDER_MCC_MAX, n_samples)
-    moisture = rng.uniform(SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, n_samples)
-    particle_size = rng.uniform(SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, n_samples)
-    binder_grade = rng.integers(0, len(BINDER_GRADES), n_samples)
-    pressure = rng.uniform(SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX, n_samples)
-    speed = rng.uniform(SLIDER_SPEED_MIN, SLIDER_SPEED_MAX, n_samples)
-    dwell_time = calculate_dwell_time(speed)
-    friction = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, n_samples)
-    decompression_time = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, n_samples)
-    granule = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, n_samples)
-
-    api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
-        api, binder, pvpp, mgst, mcc, moisture
-    )
-    api_binder = api_n * binder_n
-    pressure_binder = pressure * binder_n
-    api_mcc = api_n * mcc_n
-    pressure_speed = pressure * speed
-    binder_mgst = binder_n * mgst_n
-    inputs = np.column_stack([
-        api_n, mcc_n, pvpp_n, mgst_n, binder_n,
-        pressure, speed, granule,
-        particle_size, moisture_n, binder_grade,
-        dwell_time, friction, decompression_time,
-        api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
-    ])
-    scaled = scaler.transform(inputs)
-    X_t = torch.tensor(scaled, dtype=torch.float32)
-    with torch.no_grad():
-        pred_scaled = model.predict(X_t)
-        pred = y_scaler.inverse_transform(pred_scaled)
-    density = pred[:, 0]
-    tensile = np.maximum(pred[:, 1], 1e-4)
-    er = np.maximum(pred[:, 2], 1e-4)
-    efrf = er / tensile
-    efrf = np.clip(efrf, 1e-4, 5.0)
-    disintegration = np.maximum(pred[:, 3], 0.5)
-
-    mask = ((D_MIN <= density) & (density <= D_MAX) &
-            (tensile >= TENSILE_MIN) & (efrf < EFRF_MAX) &
-            (disintegration <= DISINTEGRATION_MAX) &
-            (mcc_n <= BOUND_MCC_MAX) & (mcc_n >= BOUND_MCC_MIN))
-    feasible_api = api_n[mask]
-    feasible_efrf = efrf[mask]
-    feasible_density = density[mask]
-    return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf, 'Density': feasible_density})
-
-def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None,
-                      tested_point=None, efrf_max=0.40, model=None, scaler=None, y_scaler=None,
-                      cost_solution=None, quality_solution=None):
+def plot_pareto_front(objectives, fronts, balanced_solution=None, quality_solution=None, cost_solution=None,
+                      model=None, scaler=None, y_scaler=None, tested_point=None):
     """
-    Plot Pareto front on Density-EFRF plane and mark the three selected solutions.
+    Plot the Pareto front in 2D: Pressure vs EFRF (or Pressure vs Tensile).
+    The user can clearly see the trade-off between cost (pressure) and quality (EFRF/tensile).
     """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
-        density_vals = -objectives[front, 0]   # density
-        efrf_vals = objectives[front, 2]
-    except Exception:
+        # objectives: columns: -density, -tensile, efrf, pressure
+        pressure_vals = objectives[front, 3]           # pressure (minimized)
+        efrf_vals = objectives[front, 2]               # efrf (minimized)
+        tensile_vals = -objectives[front, 1]           # tensile (maximized)
+    except Exception as e:
         return None
 
-    df_front = pd.DataFrame({'Density': density_vals, 'EFRF': efrf_vals}).sort_values('Density')
+    # Sort by pressure for a smooth line
+    sorted_idx = np.argsort(pressure_vals)
+    pressure_vals = pressure_vals[sorted_idx]
+    efrf_vals = efrf_vals[sorted_idx]
+    tensile_vals = tensile_vals[sorted_idx]
+
     fig = go.Figure()
 
-    # Feasible region (using density)
-    if feasible_df is not None and not feasible_df.empty and 'Density' in feasible_df.columns:
-        fig.add_trace(go.Scatter(
-            x=feasible_df['Density'],
-            y=feasible_df['EFRF'],
-            mode='markers',
-            name='Feasible Region',
-            marker=dict(color='lightgreen', size=4, opacity=0.4),
-            hovertemplate='Density: %{x:.3f}<br>EFRF: %{y:.4f}<extra></extra>',
-            showlegend=True
-        ))
-
-    # Pareto front
+    # Pareto front (Pressure vs EFRF)
     fig.add_trace(go.Scatter(
-        x=df_front['Density'],
-        y=df_front['EFRF'],
+        x=pressure_vals,
+        y=efrf_vals,
         mode='lines+markers',
-        name='Pareto Front',
+        name='Pareto Front (Pressure vs EFRF)',
         line=dict(color='red', width=2),
         marker=dict(size=7, color='red'),
-        hovertemplate='Density: %{x:.3f}<br>EFRF: %{y:.4f}<extra></extra>'
+        hovertemplate='Pressure: %{x:.1f} MPa<br>EFRF: %{y:.4f}<extra></extra>'
     ))
 
-    # Tested formulation (if we have its density)
-    if tested_point is not None and len(tested_point) >= 2:
-        # tested_point should be (api, efrf) but we need density, so we compute it
-        # In the main call we will pass (density, efrf) instead
-        fig.add_trace(go.Scatter(
-            x=[tested_point[0]],
-            y=[tested_point[1]],
-            mode='markers',
-            name='Tested Formulation',
-            marker=dict(size=10, color='blue', symbol='circle',
-                        line=dict(width=2, color='darkblue')),
-            hovertemplate='Tested: Density %{x:.3f}, EFRF %{y:.4f}<extra></extra>'
-        ))
-
-    # Helper to add a solution marker
+    # Add selected solutions
     def add_solution(solution, label, color, symbol):
         if solution is not None:
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+            d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, solution)
+            p = solution[5]
             fig.add_trace(go.Scatter(
-                x=[d],
+                x=[p],
                 y=[ef],
                 mode='markers',
                 name=label,
-                marker=dict(size=12, color=color, symbol=symbol, line=dict(width=1, color='black')),
-                hovertemplate=f'{label}<br>Density: {d:.3f}<br>EFRF: {ef:.4f}<extra></extra>'
+                marker=dict(size=14, color=color, symbol=symbol, line=dict(width=1, color='black')),
+                hovertemplate=f'{label}<br>Pressure: {p:.1f} MPa<br>EFRF: {ef:.4f}<extra></extra>'
             ))
 
     add_solution(balanced_solution, '⚖️ Balanced', 'gold', 'star')
     add_solution(quality_solution, '🏆 Quality', 'green', 'diamond')
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
-    # Threshold line
+    # Tested point
+    if tested_point is not None and len(tested_point) >= 2:
+        # tested_point: (pressure, efrf)
+        fig.add_trace(go.Scatter(
+            x=[tested_point[0]],
+            y=[tested_point[1]],
+            mode='markers',
+            name='Tested Formulation',
+            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
+            hovertemplate='Tested: Pressure %{x:.1f} MPa, EFRF %{y:.4f}<extra></extra>'
+        ))
+
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
                   annotation_text='EFRF threshold (0.40)')
     fig.update_layout(
-        title='Pareto Front and Selected Solutions',
-        xaxis_title='Density',
+        title='Pareto Front – Pressure vs EFRF Trade‑off',
+        xaxis_title='Pressure (MPa)',
         yaxis_title='EFRF',
         height=450,
         template='plotly_white',
@@ -840,13 +714,11 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # ---- Load model (with fallback) ----
     model, scaler, y_scaler, features, df = get_model()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if model is not None:
         device = next(model.parameters()).device
 
-    # ---- Sidebar ----
     with st.sidebar:
         st.markdown("### 📊 Formulation & Material Parameters")
         with st.container(border=True):
@@ -881,7 +753,7 @@ def main():
                 else:
                     granule = st.session_state.get('granule', 125.0)
                     granule_fixed = False
-                    st.info(f"Granule size optimised by NSGA-II")
+                    st.info("Granule size optimised by NSGA-II")
             with c2:
                 dwell_time = st.slider("Dwell Time (ms)", SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX, st.session_state.dwell_time, 0.5, key="dwell_time")
                 friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
@@ -889,51 +761,32 @@ def main():
 
         st.markdown("### ⚙️ Penalty Adjustment (for balanced score)")
         with st.container(border=True):
-            # These are now used only to compute balanced_score, not as penalties in NSGA-II
+            # These sliders are only used to compute the balanced score, not in NSGA-II
             penalty_api = st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
             penalty_tensile = st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
             penalty_efrf = st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
 
         predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
 
-    # ---- Main Panel ----
-    col_left, col_right = st.columns([1, 1.2], gap="medium")
-
-    with col_right:
+    with st.container():
         st.markdown("### 📈 Results")
 
         if predict_btn:
             if model is None:
-                st.error("❌ Model not loaded. Please check the checkpoint file.")
+                st.error("❌ Model not loaded.")
             elif abs(total-100) > 0.5:
-                st.warning("⚠️ Formulation must sum to 100% (within 0.5%)")
+                st.warning("⚠️ Formulation must sum to 100%")
             else:
                 api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
                     api, binder, pvpp, mgst, mcc, moisture
                 )
-                if granule_fixed:
-                    granule_use = granule
-                else:
-                    granule_use = granule
+                granule_use = granule if granule_fixed else granule
                 inputs = [api_n, mcc_n, pvpp_n, mgst_n, binder_n, pressure, speed, granule_use,
                           particle_size, moisture_n, st.session_state.binder_grade_index, dwell_time, friction, decompression_time]
 
-                density, tensile, er, efrf, disintegration, dissolution_tau, dissolution_beta = predict_pinn(model, scaler, y_scaler, inputs)
+                density, tensile, er, efrf, disintegration = predict_pinn(model, scaler, y_scaler, inputs)
 
-                st.session_state.formulation = {
-                    'api_n': api_n, 'binder_n': binder_n, 'pvpp_n': pvpp_n,
-                    'mgst_n': mgst_n, 'mcc_n': mcc_n, 'moisture': moisture_n,
-                    'particle_size': particle_size, 'binder_grade': st.session_state.binder_grade_index,
-                    'pressure': pressure, 'speed': speed, 'dwell_time': dwell_time,
-                    'friction': friction, 'decompression_time': decompression_time,
-                    'granule_use': granule_use, 'granule_fixed': granule_fixed,
-                    'density': density, 'tensile': tensile, 'er': er, 'efrf': efrf,
-                    'disintegration': disintegration, 'dissolution_tau': dissolution_tau,
-                    'dissolution_beta': dissolution_beta
-                }
-
-                # ---- Constraint Status (real, no clipping) ----
-                st.markdown("**Constraint Status** (Density: 0.72–0.99, Tensile ≥ 1.50, EFRF < 0.40, Disintegration ≤ 15 min)")
+                st.markdown("**Constraint Status**")
                 col_metrics = st.columns(5)
                 col_metrics[0].metric("Density", f"{density:.3f}", f"[0.72, {D_MAX:.2f}]")
                 col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {TENSILE_MIN:.2f}")
@@ -948,7 +801,7 @@ def main():
                 else:
                     st.error("❌ Constraints violated")
 
-                # ---- NSGA-II Optimisation ----
+                # ---- NSGA-II ----
                 bounds = np.array([
                     [SLIDER_API_MIN, SLIDER_API_MAX],
                     [BOUND_MCC_MIN, BOUND_MCC_MAX],
@@ -971,7 +824,7 @@ def main():
                         model, scaler, y_scaler, bounds,
                         pop=NSGA_POP, gens=NSGA_GENS,
                         granule_fixed=granule_fixed,
-                        granule_fixed_val=granule if granule_fixed else 125.0
+                        granule_fixed_val=granule_use
                     )
                     pop, objectives, fronts, violations = nsga.run()
 
@@ -980,99 +833,84 @@ def main():
                 st.session_state.nsga_fronts = fronts
                 st.session_state.run_optimized = True
 
-                # ---- Extract 3 distinct solutions from Pareto front ----
-                balanced_solution = None
-                quality_solution = None
-                cost_solution = None
-
+                # ---- Extract 3 distinct solutions ----
+                balanced_solution = quality_solution = cost_solution = None
                 if len(fronts) > 0 and len(fronts[0]) > 0:
                     front_indices = fronts[0]
-                    n_front = len(front_indices)
+                    candidates = []
+                    for idx in front_indices:
+                        ind = pop[idx]
+                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, ind)
+                        p = ind[5]
+                        candidates.append({
+                            'idx': idx,
+                            'ind': ind,
+                            'density': d,
+                            'tensile': t,
+                            'efrf': ef,
+                            'pressure': p,
+                            'disintegration': dis,
+                            'score': d - 20*ef - 0.01*p   # balanced score
+                        })
 
-                    if n_front >= 1:
-                        # Collect candidates with their attributes
-                        candidates = []
-                        for idx in front_indices:
-                            ind = pop[idx]
-                            api_val = -objectives[idx, 0]  # actually density, but we'll recompute
-                            # Re-predict to get accurate values
-                            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, ind)
-                            pressure_val = ind[5]
-                            candidates.append({
-                                'idx': idx,
-                                'ind': ind,
-                                'density': d,
-                                'tensile': t,
-                                'efrf': ef,
-                                'pressure': pressure_val,
-                                'disintegration': dis
-                            })
+                    # Balanced: best score
+                    candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
+                    balanced = candidates_sorted_bal[0]
+                    balanced_solution = balanced['ind']
 
-                        # Sort by balanced score: maximize density - 20*efrf (adjust weights)
-                        candidates_sorted_bal = sorted(candidates, key=lambda x: x['density'] - 20*x['efrf'], reverse=True)
-                        balanced = candidates_sorted_bal[0]
-                        balanced_solution = balanced['ind']
+                    # Quality: highest tensile
+                    candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
+                    quality = candidates_sorted_qual[0]
+                    if quality['idx'] == balanced['idx'] and len(candidates_sorted_qual) > 1:
+                        quality = candidates_sorted_qual[1]
+                    quality_solution = quality['ind']
 
-                        # Quality: highest tensile
-                        candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
-                        quality = candidates_sorted_qual[0]
-                        if quality['idx'] == balanced['idx'] and len(candidates_sorted_qual) > 1:
-                            quality = candidates_sorted_qual[1]
-                        quality_solution = quality['ind']
+                    # Cost: lowest pressure
+                    candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
+                    cost = candidates_sorted_cost[0]
+                    if cost['idx'] == balanced['idx'] or cost['idx'] == quality['idx']:
+                        for c in candidates_sorted_cost:
+                            if c['idx'] != balanced['idx'] and c['idx'] != quality['idx']:
+                                cost = c
+                                break
+                    cost_solution = cost['ind']
 
-                        # Cost: lowest pressure
-                        candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
-                        cost = candidates_sorted_cost[0]
-                        if cost['idx'] == balanced['idx'] or cost['idx'] == quality['idx']:
-                            for c in candidates_sorted_cost:
-                                if c['idx'] != balanced['idx'] and c['idx'] != quality['idx']:
-                                    cost = c
-                                    break
-                        cost_solution = cost['ind']
+                    st.session_state.balanced_solution = balanced_solution
+                    st.session_state.quality_solution = quality_solution
+                    st.session_state.cost_solution = cost_solution
 
-                        # Store
-                        st.session_state.balanced_solution = balanced_solution
-                        st.session_state.quality_solution = quality_solution
-                        st.session_state.cost_solution = cost_solution
-
-                # Store predictions for each
-                if balanced_solution is not None:
-                    d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, balanced_solution)
-                    st.session_state.balanced_pred = (d, t, e, ef, dis, tau, beta)
-                if quality_solution is not None:
-                    d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, quality_solution)
-                    st.session_state.quality_pred = (d, t, e, ef, dis, tau, beta)
-                if cost_solution is not None:
-                    d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, cost_solution)
-                    st.session_state.cost_pred = (d, t, e, ef, dis, tau, beta)
+                    # Store predictions
+                    if balanced_solution:
+                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, balanced_solution)
+                        st.session_state.balanced_pred = (d, t, e, ef, dis)
+                    if quality_solution:
+                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, quality_solution)
+                        st.session_state.quality_pred = (d, t, e, ef, dis)
+                    if cost_solution:
+                        d, t, e, ef, dis = predict_pinn(model, scaler, y_scaler, cost_solution)
+                        st.session_state.cost_pred = (d, t, e, ef, dis)
 
                 # ---- Show Pareto Front ----
-                st.markdown("### 📉 Pareto Front")
-                if fronts is not None and len(fronts) > 0 and len(fronts[0]) > 0:
+                st.markdown("### 📉 Pareto Front – Pressure vs EFRF")
+                if fronts is not None and len(fronts[0]) > 0:
                     st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
-                    # Generate feasible region for plotting (density vs EFRF)
-                    feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
-                    # Prepare tested point (density, efrf) for the initial formulation
-                    tested_density_efrf = (density, efrf)
-                    fig = plot_pareto_clean(
+                    fig = plot_pareto_front(
                         objectives, fronts,
                         balanced_solution=balanced_solution,
-                        feasible_df=feasible_df,
-                        tested_point=tested_density_efrf,
-                        model=model, scaler=scaler, y_scaler=y_scaler,
+                        quality_solution=quality_solution,
                         cost_solution=cost_solution,
-                        quality_solution=quality_solution
+                        model=model, scaler=scaler, y_scaler=y_scaler,
+                        tested_point=(pressure, efrf) if constraints_ok else None
                     )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
 
-                # ---- Show 3 Solutions ----
+                # ---- Show Solutions Table ----
                 st.markdown("### 📊 Optimal Solutions Comparison")
-                solutions_rows = []
-
+                rows = []
                 if balanced_solution is not None and st.session_state.balanced_pred is not None:
-                    d, t, e, ef, dis, tau, beta = st.session_state.balanced_pred
-                    solutions_rows.append({
+                    d, t, e, ef, dis = st.session_state.balanced_pred
+                    rows.append({
                         "Type": "⚖️ Balanced",
                         "API (%)": round(balanced_solution[0], 1),
                         "MCC (%)": round(balanced_solution[1], 1),
@@ -1090,10 +928,9 @@ def main():
                         "EFRF": round(ef, 4),
                         "Disintegration (min)": round(dis, 1),
                     })
-
                 if st.session_state.show_cost_solution and cost_solution is not None and st.session_state.cost_pred is not None:
-                    d, t, e, ef, dis, tau, beta = st.session_state.cost_pred
-                    solutions_rows.append({
+                    d, t, e, ef, dis = st.session_state.cost_pred
+                    rows.append({
                         "Type": "💰 Cost-Optimized",
                         "API (%)": round(cost_solution[0], 1),
                         "MCC (%)": round(cost_solution[1], 1),
@@ -1111,10 +948,9 @@ def main():
                         "EFRF": round(ef, 4),
                         "Disintegration (min)": round(dis, 1),
                     })
-
                 if st.session_state.show_quality_solution and quality_solution is not None and st.session_state.quality_pred is not None:
-                    d, t, e, ef, dis, tau, beta = st.session_state.quality_pred
-                    solutions_rows.append({
+                    d, t, e, ef, dis = st.session_state.quality_pred
+                    rows.append({
                         "Type": "🏆 Quality-Optimized",
                         "API (%)": round(quality_solution[0], 1),
                         "MCC (%)": round(quality_solution[1], 1),
@@ -1132,10 +968,8 @@ def main():
                         "EFRF": round(ef, 4),
                         "Disintegration (min)": round(dis, 1),
                     })
-
-                if solutions_rows:
-                    df_solutions = pd.DataFrame(solutions_rows)
-                    st.dataframe(df_solutions, use_container_width=True, hide_index=True)
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
                 st.markdown("---")
                 st.toggle("💰 Show Cost-wise Solution", value=st.session_state.get("show_cost_solution", True), key="show_cost_solution")
