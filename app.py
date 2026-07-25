@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – WITH MAX API SLIDER FOR SPREAD
+# FINAL – FORCED API SPREAD (80‑98%) WITH MINIMIZE API
 # ================================================================
 
 import streamlit as st
@@ -53,9 +53,11 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-NSGA_POP = 150
-NSGA_GENS = 120
+# Increased for better exploration
+NSGA_POP = 200
+NSGA_GENS = 150
 HIDDEN_SIZE = 512
+
 MIN_PRESSURE_DIFF = 5.0
 MIN_API_DIFF = 3.0
 
@@ -63,7 +65,7 @@ FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
 # ================================================================
-# SESSION STATE
+# SESSION STATE (default API objective = Minimize (Cost))
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -77,12 +79,12 @@ if 'api' not in st.session_state:
         'run_optimized': False,
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
-        'api_objective': 'Maximize (Quality)',
+        'api_objective': 'Minimize (Cost)',   # default now
         'max_api': 98.0,
     })
 
 # ================================================================
-# HELPERS
+# HELPERS (unchanged)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     comps = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
@@ -125,7 +127,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return tau, beta
 
 # ================================================================
-# PINN MODEL
+# PINN MODEL (unchanged)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -176,7 +178,7 @@ class MultiTaskPINN(nn.Module):
             return self.forward(X_scaled).cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (full 6 outputs)
+# DATA GENERATION (unchanged)
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -278,7 +280,7 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (with fallback)
+# MODEL LOADER (unchanged)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -351,11 +353,11 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – with dynamic API upper bound
+# NSGA-II OPTIMIZER – with API minimization
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
-                 granule_fixed=True, granule_fixed_val=125.0, api_objective='Maximize (Quality)',
+                 granule_fixed=True, granule_fixed_val=125.0, api_objective='Minimize (Cost)',
                  max_api=98.0):
         self.model = model
         self.scaler = scaler
@@ -450,9 +452,10 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
+        # 5th objective: API direction
         if self.api_objective == 'Maximize (Quality)':
             api_obj = -api
-        else:
+        else:  # Minimize (Cost) – this is default now
             api_obj = api
 
         objectives = np.column_stack([
@@ -546,7 +549,7 @@ class NSGAIIOptimizer:
         rng = np.random.default_rng()
         pop = []
         for _ in range(self.pop_size):
-            api = rng.uniform(SLIDER_API_MIN, self.max_api)   # initialise within bounded range
+            api = rng.uniform(SLIDER_API_MIN, self.max_api)
             mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
             binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX)
             pvpp = rng.uniform(BOUND_PVPP_MIN, BOUND_PVPP_MAX)
@@ -703,8 +706,6 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
                   annotation_text='EFRF threshold (0.40)')
     fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
                   annotation_text=f'API min ({SLIDER_API_MIN}%)')
-    # Use the max_api from session state for the vertical line, but we don't have it in this function.
-    # We'll just show a generic annotation.
     fig.update_layout(
         title='Pareto Front – API vs EFRF Trade‑off',
         xaxis_title='API (%)',
@@ -769,7 +770,7 @@ def main():
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
         st.markdown("### ⚙️ API Objective Direction")
-        current_obj = st.session_state.get('api_objective', 'Maximize (Quality)')
+        current_obj = st.session_state.get('api_objective', 'Minimize (Cost)')  # default
         api_obj = st.radio(
             "API Objective:",
             options=["Maximize (Quality)", "Minimize (Cost)"],
@@ -777,6 +778,10 @@ def main():
             key="api_objective_radio"
         )
         st.session_state.api_objective = api_obj
+        if api_obj == "Minimize (Cost)":
+            st.info("💡 API will be minimised – the Pareto front will span from low to high API.")
+        else:
+            st.warning("⚠️ API maximised – front may cluster at high API. Use 'Minimize' for spread.")
 
         st.markdown("### ⚙️ Max API for Optimisation")
         max_api = st.slider(
@@ -849,7 +854,7 @@ def main():
                     [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
                 ])
 
-                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS}, max API={max_api:.1f}%) ..."):
+                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS}, API objective: {api_obj}) ..."):
                     nsga = NSGAIIOptimizer(
                         model, scaler, y_scaler, bounds,
                         pop=NSGA_POP, gens=NSGA_GENS,
@@ -864,7 +869,7 @@ def main():
                 st.session_state.nsga_objectives = objectives
                 st.session_state.nsga_fronts = fronts
 
-                # ---- Extract 3 distinct solutions with API spread ----
+                # ---- Extract 3 distinct solutions ----
                 balanced_solution = None
                 quality_solution = None
                 cost_solution = None
@@ -893,34 +898,56 @@ def main():
                     candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
                     balanced = candidates_sorted_bal[0]
                     balanced_solution = balanced['ind']
+                    balanced_idx = balanced['idx']
                     pressure_bal = balanced['pressure']
                     api_bal = balanced['api']
 
-                    # Quality: highest tensile, must differ in both API and pressure
-                    candidates_qual = [c for c in candidates 
-                                       if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
-                                       and abs(c['api'] - api_bal) >= MIN_API_DIFF]
-                    if not candidates_qual:
-                        candidates_qual = sorted(candidates, 
-                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal), 
+                    # Quality: highest tensile, ensure different index
+                    candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
+                    quality = None
+                    for c in candidates_sorted_qual:
+                        if c['idx'] != balanced_idx:
+                            quality = c
+                            break
+                    if quality is None:
+                        # Fall back to farthest in API+pressure
+                        candidates_dist = sorted(candidates, 
+                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal),
                                                  reverse=True)
-                    quality = max(candidates_qual, key=lambda x: x['tensile'])
+                        for c in candidates_dist:
+                            if c['idx'] != balanced_idx:
+                                quality = c
+                                break
+                    if quality is None:
+                        quality = candidates_sorted_bal[1] if len(candidates_sorted_bal) > 1 else balanced
                     quality_solution = quality['ind']
+                    quality_idx = quality['idx']
                     pressure_qual = quality['pressure']
                     api_qual = quality['api']
 
-                    # Cost: lowest pressure, must differ from both balanced and quality
-                    candidates_cost = [c for c in candidates 
-                                       if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
-                                       and abs(c['api'] - api_bal) >= MIN_API_DIFF
-                                       and abs(c['pressure'] - pressure_qual) >= MIN_PRESSURE_DIFF
-                                       and abs(c['api'] - api_qual) >= MIN_API_DIFF]
-                    if not candidates_cost:
-                        candidates_cost = sorted(candidates, 
-                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal) +
-                                                                abs(c['pressure'] - pressure_qual) + abs(c['api'] - api_qual),
-                                                 reverse=True)
-                    cost = min(candidates_cost, key=lambda x: x['pressure'])
+                    # Cost: lowest pressure, ensure different from both balanced and quality
+                    candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
+                    cost = None
+                    for c in candidates_sorted_cost:
+                        if c['idx'] != balanced_idx and c['idx'] != quality_idx:
+                            cost = c
+                            break
+                    if cost is None:
+                        candidates_dist2 = sorted(candidates,
+                                                  key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal) +
+                                                                 abs(c['pressure'] - pressure_qual) + abs(c['api'] - api_qual),
+                                                  reverse=True)
+                        for c in candidates_dist2:
+                            if c['idx'] != balanced_idx and c['idx'] != quality_idx:
+                                cost = c
+                                break
+                    if cost is None:
+                        for c in candidates_sorted_bal:
+                            if c['idx'] != balanced_idx and c['idx'] != quality_idx:
+                                cost = c
+                                break
+                    if cost is None:
+                        cost = candidates_sorted_bal[2] if len(candidates_sorted_bal) > 2 else balanced
                     cost_solution = cost['ind']
 
                     st.session_state.balanced_solution = balanced_solution
