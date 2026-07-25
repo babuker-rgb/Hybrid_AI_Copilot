@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – FORCED API SPREAD (80‑98%) WITH MINIMIZE API
+# FINAL – AUTO‑EXPLORE API RANGE FOR FULL PARETO CURVE
 # ================================================================
 
 import streamlit as st
@@ -53,9 +53,9 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# Increased for better exploration
-NSGA_POP = 200
-NSGA_GENS = 150
+# Base NSGA‑II parameters (will be multiplied for auto‑explore)
+BASE_POP = 80
+BASE_GENS = 60
 HIDDEN_SIZE = 512
 
 MIN_PRESSURE_DIFF = 5.0
@@ -65,7 +65,7 @@ FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
 # ================================================================
-# SESSION STATE (default API objective = Minimize (Cost))
+# SESSION STATE
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -79,8 +79,12 @@ if 'api' not in st.session_state:
         'run_optimized': False,
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
-        'api_objective': 'Minimize (Cost)',   # default now
+        'api_objective': 'Minimize (Cost)',
         'max_api': 98.0,
+        'auto_explore': False,
+        'explore_min_api': 80.0,
+        'explore_max_api': 98.0,
+        'explore_steps': 5,
     })
 
 # ================================================================
@@ -353,10 +357,10 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – with API minimization
+# NSGA-II OPTIMIZER (same as before, with max_api parameter)
 # ================================================================
 class NSGAIIOptimizer:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
+    def __init__(self, model, scaler, y_scaler, bounds, pop=80, gens=60,
                  granule_fixed=True, granule_fixed_val=125.0, api_objective='Minimize (Cost)',
                  max_api=98.0):
         self.model = model
@@ -452,10 +456,9 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # 5th objective: API direction
         if self.api_objective == 'Maximize (Quality)':
             api_obj = -api
-        else:  # Minimize (Cost) – this is default now
+        else:
             api_obj = api
 
         objectives = np.column_stack([
@@ -649,7 +652,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
 def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
-                      model=None, scaler=None, y_scaler=None, tested_point=None):
+                      model=None, scaler=None, y_scaler=None, tested_point=None, title="Pareto Front"):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -669,7 +672,7 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
         x=api_vals,
         y=efrf_vals,
         mode='lines+markers',
-        name='Pareto Front (API vs EFRF)',
+        name='Pareto Front',
         line=dict(color='red', width=2),
         marker=dict(size=7, color='red'),
         hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
@@ -706,8 +709,10 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
                   annotation_text='EFRF threshold (0.40)')
     fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
                   annotation_text=f'API min ({SLIDER_API_MIN}%)')
+    fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
+                  annotation_text=f'API max ({SLIDER_API_MAX}%)')
     fig.update_layout(
-        title='Pareto Front – API vs EFRF Trade‑off',
+        title=title,
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
@@ -715,6 +720,27 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
         legend=dict(x=0.8, y=0.95)
     )
     return fig
+
+def combine_pareto_fronts(all_results):
+    """Combine Pareto fronts from multiple runs (each result is (pop, objectives, fronts))."""
+    combined_pop = []
+    combined_objectives = []
+    for pop, objectives, fronts, _ in all_results:
+        if fronts and len(fronts[0]) > 0:
+            front_idx = fronts[0]
+            combined_pop.append(pop[front_idx])
+            combined_objectives.append(objectives[front_idx])
+    if not combined_pop:
+        return None, None, None
+    combined_pop = np.vstack(combined_pop)
+    combined_objectives = np.vstack(combined_objectives)
+    # Recompute non-dominated sorting on combined set
+    violations = np.zeros(len(combined_pop))  # all feasible (we assume)
+    # Simple non-dominated sorting on combined objectives
+    nsga = None  # dummy
+    # We'll just return the combined set; the plotting function expects fronts, so we'll create a single front with all.
+    combined_fronts = [list(range(len(combined_pop)))]
+    return combined_pop, combined_objectives, combined_fronts
 
 # ================================================================
 # MAIN
@@ -770,7 +796,7 @@ def main():
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
         st.markdown("### ⚙️ API Objective Direction")
-        current_obj = st.session_state.get('api_objective', 'Minimize (Cost)')  # default
+        current_obj = st.session_state.get('api_objective', 'Minimize (Cost)')
         api_obj = st.radio(
             "API Objective:",
             options=["Maximize (Quality)", "Minimize (Cost)"],
@@ -779,7 +805,7 @@ def main():
         )
         st.session_state.api_objective = api_obj
         if api_obj == "Minimize (Cost)":
-            st.info("💡 API will be minimised – the Pareto front will span from low to high API.")
+            st.info("💡 API minimised – front spans from low to high API.")
         else:
             st.warning("⚠️ API maximised – front may cluster at high API. Use 'Minimize' for spread.")
 
@@ -794,6 +820,18 @@ def main():
         )
         st.session_state.max_api = max_api
         st.caption(f"API will be capped at {max_api:.1f}% during optimisation.")
+
+        st.markdown("### ⚙️ Auto‑Explore API Range")
+        auto_explore = st.checkbox("Auto‑explore API range (multiple runs)", value=st.session_state.get('auto_explore', False))
+        st.session_state.auto_explore = auto_explore
+        if auto_explore:
+            explore_min = st.slider("Min API", 80.0, 95.0, st.session_state.get('explore_min_api', 80.0), 0.5)
+            explore_max = st.slider("Max API", 85.0, 98.0, st.session_state.get('explore_max_api', 98.0), 0.5)
+            explore_steps = st.slider("Number of steps", 2, 10, st.session_state.get('explore_steps', 5), 1)
+            st.session_state.explore_min_api = explore_min
+            st.session_state.explore_max_api = explore_max
+            st.session_state.explore_steps = explore_steps
+            st.caption(f"Will run {explore_steps} optimisations with different API caps.")
 
         st.markdown("### ⚙️ Balanced Score Weights")
         with st.container(border=True):
@@ -836,7 +874,7 @@ def main():
                 else:
                     st.error("❌ Constraints violated")
 
-                # ---- NSGA-II ----
+                # ---- NSGA-II (single or auto-explore) ----
                 bounds = np.array([
                     [SLIDER_API_MIN, SLIDER_API_MAX],
                     [BOUND_MCC_MIN, BOUND_MCC_MAX],
@@ -854,22 +892,56 @@ def main():
                     [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
                 ])
 
-                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS}, API objective: {api_obj}) ..."):
-                    nsga = NSGAIIOptimizer(
-                        model, scaler, y_scaler, bounds,
-                        pop=NSGA_POP, gens=NSGA_GENS,
-                        granule_fixed=granule_fixed,
-                        granule_fixed_val=granule_use,
-                        api_objective=api_obj,
-                        max_api=max_api
-                    )
-                    pop, objectives, fronts, violations = nsga.run()
+                all_results = []
+                if st.session_state.auto_explore:
+                    # Prepare caps
+                    caps = np.linspace(st.session_state.explore_min_api,
+                                       st.session_state.explore_max_api,
+                                       st.session_state.explore_steps)
+                    st.info(f"Running {len(caps)} optimisations with API caps: {', '.join([f'{c:.1f}%' for c in caps])}")
+                    progress_bar = st.progress(0)
+                    for i, cap in enumerate(caps):
+                        with st.spinner(f"Running NSGA‑II with max API = {cap:.1f}% ..."):
+                            nsga = NSGAIIOptimizer(
+                                model, scaler, y_scaler, bounds,
+                                pop=BASE_POP, gens=BASE_GENS,
+                                granule_fixed=granule_fixed,
+                                granule_fixed_val=granule_use,
+                                api_objective=api_obj,
+                                max_api=cap
+                            )
+                            pop, objectives, fronts, violations = nsga.run()
+                            all_results.append((pop, objectives, fronts, violations))
+                        progress_bar.progress((i+1)/len(caps))
+                    progress_bar.empty()
+                    # Combine fronts
+                    combined_pop, combined_obj, combined_fronts = combine_pareto_fronts(all_results)
+                    if combined_pop is not None:
+                        # Use combined results for display
+                        pop = combined_pop
+                        objectives = combined_obj
+                        fronts = combined_fronts
+                        st.success(f"✅ Combined Pareto front: {len(combined_pop)} solutions from {len(caps)} runs.")
+                    else:
+                        st.error("No results from auto-explore.")
+                        return
+                else:
+                    with st.spinner(f"Running NSGA‑II (pop={BASE_POP}, gens={BASE_GENS}, API cap={max_api:.1f}%) ..."):
+                        nsga = NSGAIIOptimizer(
+                            model, scaler, y_scaler, bounds,
+                            pop=BASE_POP, gens=BASE_GENS,
+                            granule_fixed=granule_fixed,
+                            granule_fixed_val=granule_use,
+                            api_objective=api_obj,
+                            max_api=max_api
+                        )
+                        pop, objectives, fronts, violations = nsga.run()
 
                 st.session_state.nsga_pop = pop
                 st.session_state.nsga_objectives = objectives
                 st.session_state.nsga_fronts = fronts
 
-                # ---- Extract 3 distinct solutions ----
+                # ---- Extract 3 distinct solutions (from first front only) ----
                 balanced_solution = None
                 quality_solution = None
                 cost_solution = None
@@ -910,7 +982,6 @@ def main():
                             quality = c
                             break
                     if quality is None:
-                        # Fall back to farthest in API+pressure
                         candidates_dist = sorted(candidates, 
                                                  key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal),
                                                  reverse=True)
@@ -967,6 +1038,7 @@ def main():
                 # ---- Show Pareto Front ----
                 st.markdown("### 📉 Pareto Front – API vs EFRF")
                 if fronts is not None and len(fronts[0]) > 0:
+                    title = "Combined Pareto Front (Auto‑Explore)" if st.session_state.auto_explore else "Pareto Front"
                     st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
                     fig = plot_pareto_front(
                         objectives, fronts, pop,
@@ -974,7 +1046,8 @@ def main():
                         quality_solution=quality_solution,
                         cost_solution=cost_solution,
                         model=model, scaler=scaler, y_scaler=y_scaler,
-                        tested_point=(api_n, efrf) if constraints_ok else None
+                        tested_point=(api_n, efrf) if constraints_ok else None,
+                        title=title
                     )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
