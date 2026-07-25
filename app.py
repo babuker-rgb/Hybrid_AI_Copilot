@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – PARETO FRONT: API vs EFRF
+# FINAL – 5 OBJECTIVES + PARETO SPREAD IN API
 # ================================================================
 
 import streamlit as st
@@ -348,7 +348,7 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – 4 OBJECTIVES
+# NSGA-II OPTIMIZER – 5 OBJECTIVES (added API)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
@@ -430,7 +430,9 @@ class NSGAIIOptimizer:
 
         efrf = er / np.maximum(tensile, 1e-4)
         pressure = repaired[:, 5]
+        api = repaired[:, 0]   # already normalized and clipped
 
+        # Constraint violations
         violation = np.zeros(n)
         violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
         violation += np.maximum(0, TENSILE_MIN - tensile)
@@ -439,11 +441,13 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
+        # 5 objectives: maximize density, maximize tensile, minimize efrf, minimize pressure, maximize API
         objectives = np.column_stack([
             -density,
             -tensile,
             efrf,
-            pressure
+            pressure,
+            -api       # we want to maximize API
         ])
         return objectives, repaired, violation
 
@@ -632,14 +636,15 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
                       model=None, scaler=None, y_scaler=None, tested_point=None):
     """
     Plot Pareto front: API % (from pop) vs EFRF (from objectives).
+    With 5 objectives, the front will now show a spread in API.
     """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
-        # Extract API from population and EFRF from objectives
-        api_vals = pop[front, 0]          # API is the first variable
-        efrf_vals = objectives[front, 2]  # EFRF is third objective
+        # Extract API from population (first variable) and EFRF from objectives (third objective)
+        api_vals = pop[front, 0]
+        efrf_vals = objectives[front, 2]
     except Exception:
         return None
 
@@ -677,7 +682,6 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
     if tested_point is not None and len(tested_point) >= 2:
-        # tested_point: (api, efrf) from initial prediction
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
@@ -694,7 +698,7 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
                   annotation_text=f'API max ({SLIDER_API_MAX}%)')
     fig.update_layout(
-        title='Pareto Front – API vs EFRF Trade‑off',
+        title='Pareto Front – API vs EFRF Trade‑off (5 objectives)',
         xaxis_title='API (%)',
         yaxis_title='EFRF',
         height=450,
@@ -815,7 +819,7 @@ def main():
                     [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
                 ])
 
-                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS})..."):
+                with st.spinner(f"Running NSGA‑II with 5 objectives (pop={NSGA_POP}, gens={NSGA_GENS})..."):
                     nsga = NSGAIIOptimizer(
                         model, scaler, y_scaler, bounds,
                         pop=NSGA_POP, gens=NSGA_GENS,
@@ -840,6 +844,7 @@ def main():
                         ind = pop[idx]
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, ind)
                         p = ind[5]
+                        api_val = ind[0]
                         candidates.append({
                             'idx': idx,
                             'ind': ind,
@@ -847,8 +852,9 @@ def main():
                             'tensile': t,
                             'efrf': ef,
                             'pressure': p,
+                            'api': api_val,
                             'disintegration': dis,
-                            'score': d - 20*ef - 0.01*p
+                            'score': d - 20*ef - 0.01*p + 0.1*api_val  # include API in balanced score
                         })
 
                     # Sort by balanced score
