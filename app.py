@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – API TOGGLE WITH SAFE SESSION STATE
+# FINAL – FORCED API SPREAD (MIN 3% DIFFERENCE)
 # ================================================================
 
 import streamlit as st
@@ -53,16 +53,20 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-NSGA_POP = 120
-NSGA_GENS = 100
+# Increased for better exploration
+NSGA_POP = 150
+NSGA_GENS = 120
 HIDDEN_SIZE = 512
-MIN_PRESSURE_DIFF = 5.0
+
+# Minimum differences between selected solutions
+MIN_PRESSURE_DIFF = 5.0   # MPa
+MIN_API_DIFF = 3.0        # percentage points
 
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
 # ================================================================
-# SESSION STATE (with safe defaults)
+# SESSION STATE
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -76,7 +80,7 @@ if 'api' not in st.session_state:
         'run_optimized': False,
         'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
         'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
-        'api_objective': 'Maximize (Quality)',   # default
+        'api_objective': 'Maximize (Quality)',
     })
 
 # ================================================================
@@ -444,9 +448,9 @@ class NSGAIIOptimizer:
 
         # 5th objective: API direction
         if self.api_objective == 'Maximize (Quality)':
-            api_obj = -api          # maximize API
+            api_obj = -api
         else:  # Minimize (Cost)
-            api_obj = api           # minimize API
+            api_obj = api
 
         objectives = np.column_stack([
             -density,
@@ -762,7 +766,6 @@ def main():
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
         st.markdown("### ⚙️ API Objective Direction")
-        # Safely get current value from session state
         current_obj = st.session_state.get('api_objective', 'Maximize (Quality)')
         api_obj = st.radio(
             "API Objective:",
@@ -831,7 +834,7 @@ def main():
                     [SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX]
                 ])
 
-                with st.spinner(f"Running NSGA‑II (API objective: {api_obj}) ..."):
+                with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS}) ..."):
                     nsga = NSGAIIOptimizer(
                         model, scaler, y_scaler, bounds,
                         pop=NSGA_POP, gens=NSGA_GENS,
@@ -845,7 +848,7 @@ def main():
                 st.session_state.nsga_objectives = objectives
                 st.session_state.nsga_fronts = fronts
 
-                # ---- Extract 3 distinct solutions ----
+                # ---- Extract 3 distinct solutions with API spread ----
                 balanced_solution = None
                 quality_solution = None
                 cost_solution = None
@@ -870,24 +873,38 @@ def main():
                             'score': d - 20*ef - 0.01*p + 0.05*api_val
                         })
 
+                    # Balanced: best score
                     candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
                     balanced = candidates_sorted_bal[0]
                     balanced_solution = balanced['ind']
-
                     pressure_bal = balanced['pressure']
-                    candidates_qual = [c for c in candidates if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF]
+                    api_bal = balanced['api']
+
+                    # Quality: highest tensile, but must differ in API AND pressure
+                    candidates_qual = [c for c in candidates 
+                                       if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
+                                       and abs(c['api'] - api_bal) >= MIN_API_DIFF]
                     if not candidates_qual:
-                        candidates_qual = sorted(candidates, key=lambda c: abs(c['pressure'] - pressure_bal), reverse=True)
+                        # Fall back: farthest combined distance
+                        candidates_qual = sorted(candidates, 
+                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal), 
+                                                 reverse=True)
                     quality = max(candidates_qual, key=lambda x: x['tensile'])
                     quality_solution = quality['ind']
-
                     pressure_qual = quality['pressure']
+                    api_qual = quality['api']
+
+                    # Cost: lowest pressure, but must differ from both balanced and quality
                     candidates_cost = [c for c in candidates 
                                        if abs(c['pressure'] - pressure_bal) >= MIN_PRESSURE_DIFF 
-                                       and abs(c['pressure'] - pressure_qual) >= MIN_PRESSURE_DIFF]
+                                       and abs(c['api'] - api_bal) >= MIN_API_DIFF
+                                       and abs(c['pressure'] - pressure_qual) >= MIN_PRESSURE_DIFF
+                                       and abs(c['api'] - api_qual) >= MIN_API_DIFF]
                     if not candidates_cost:
                         candidates_cost = sorted(candidates, 
-                                                 key=lambda c: -(abs(c['pressure'] - pressure_bal) + abs(c['pressure'] - pressure_qual)))
+                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal) +
+                                                                abs(c['pressure'] - pressure_qual) + abs(c['api'] - api_qual),
+                                                 reverse=True)
                     cost = min(candidates_cost, key=lambda x: x['pressure'])
                     cost_solution = cost['ind']
 
