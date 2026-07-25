@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# COMPLETE PRODUCTION CODE – FIXED NSGA‑II & DIVERSITY
+# COMPLETE PRODUCTION CODE – FIXED PLOT & SELECTION
 # ================================================================
 
 import streamlit as st
@@ -57,11 +57,11 @@ BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
 # ---- NSGA‑II parameters ----
-NSGA_POP = 100                # increased for better diversity
-NSGA_GENS = 80                # increased for convergence
+NSGA_POP = 100
+NSGA_GENS = 80
 HIDDEN_SIZE = 512
 
-# ---- Fallback training parameters (used if full model missing) ----
+# ---- Fallback training parameters ----
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
@@ -741,40 +741,54 @@ def generate_feasible_points(model, scaler, y_scaler, n_samples=3000):
             (mcc_n <= BOUND_MCC_MAX) & (mcc_n >= BOUND_MCC_MIN))
     feasible_api = api_n[mask]
     feasible_efrf = efrf[mask]
-    return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf})
+    feasible_density = density[mask]
+    return pd.DataFrame({'API': feasible_api, 'EFRF': feasible_efrf, 'Density': feasible_density})
 
 def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=None,
-                      tested_point=None, efrf_max=0.40):
+                      tested_point=None, efrf_max=0.40, model=None, scaler=None, y_scaler=None,
+                      cost_solution=None, quality_solution=None):
+    """
+    Plot Pareto front on Density-EFRF plane and mark the three selected solutions.
+    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
-        api_vals = -objectives[front, 0]
+        density_vals = -objectives[front, 0]   # density
         efrf_vals = objectives[front, 2]
     except Exception:
         return None
-    df_front = pd.DataFrame({'API': api_vals, 'EFRF': efrf_vals}).sort_values('API')
+
+    df_front = pd.DataFrame({'Density': density_vals, 'EFRF': efrf_vals}).sort_values('Density')
     fig = go.Figure()
-    if feasible_df is not None and not feasible_df.empty:
+
+    # Feasible region (using density)
+    if feasible_df is not None and not feasible_df.empty and 'Density' in feasible_df.columns:
         fig.add_trace(go.Scatter(
-            x=feasible_df['API'],
+            x=feasible_df['Density'],
             y=feasible_df['EFRF'],
             mode='markers',
-            name='Feasible Region (EFRF<0.40)',
+            name='Feasible Region',
             marker=dict(color='lightgreen', size=4, opacity=0.4),
-            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>',
+            hovertemplate='Density: %{x:.3f}<br>EFRF: %{y:.4f}<extra></extra>',
             showlegend=True
         ))
+
+    # Pareto front
     fig.add_trace(go.Scatter(
-        x=df_front['API'],
+        x=df_front['Density'],
         y=df_front['EFRF'],
         mode='lines+markers',
         name='Pareto Front',
         line=dict(color='red', width=2),
         marker=dict(size=7, color='red'),
-        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+        hovertemplate='Density: %{x:.3f}<br>EFRF: %{y:.4f}<extra></extra>'
     ))
-    if tested_point is not None:
+
+    # Tested formulation (if we have its density)
+    if tested_point is not None and len(tested_point) >= 2:
+        # tested_point should be (api, efrf) but we need density, so we compute it
+        # In the main call we will pass (density, efrf) instead
         fig.add_trace(go.Scatter(
             x=[tested_point[0]],
             y=[tested_point[1]],
@@ -782,22 +796,32 @@ def plot_pareto_clean(objectives, fronts, balanced_solution=None, feasible_df=No
             name='Tested Formulation',
             marker=dict(size=10, color='blue', symbol='circle',
                         line=dict(width=2, color='darkblue')),
-            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
+            hovertemplate='Tested: Density %{x:.3f}, EFRF %{y:.4f}<extra></extra>'
         ))
-    if balanced_solution is not None and len(balanced_solution) >= 2:
-        fig.add_trace(go.Scatter(
-            x=[balanced_solution[0]],
-            y=[balanced_solution[1]],
-            mode='markers',
-            name='⭐ Golden Solution (Balanced)',
-            marker=dict(size=12, color='gold', symbol='star', line=dict(width=2, color='black')),
-            hovertemplate='Golden: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
-        ))
+
+    # Helper to add a solution marker
+    def add_solution(solution, label, color, symbol):
+        if solution is not None:
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+            fig.add_trace(go.Scatter(
+                x=[d],
+                y=[ef],
+                mode='markers',
+                name=label,
+                marker=dict(size=12, color=color, symbol=symbol, line=dict(width=1, color='black')),
+                hovertemplate=f'{label}<br>Density: {d:.3f}<br>EFRF: {ef:.4f}<extra></extra>'
+            ))
+
+    add_solution(balanced_solution, '⚖️ Balanced', 'gold', 'star')
+    add_solution(quality_solution, '🏆 Quality', 'green', 'diamond')
+    add_solution(cost_solution, '💰 Cost', 'orange', 'square')
+
+    # Threshold line
     fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
                   annotation_text='EFRF threshold (0.40)')
     fig.update_layout(
-        title='Pareto Front with Feasible Region',
-        xaxis_title='API (%)',
+        title='Pareto Front and Selected Solutions',
+        xaxis_title='Density',
         yaxis_title='EFRF',
         height=450,
         template='plotly_white',
@@ -970,42 +994,36 @@ def main():
                         candidates = []
                         for idx in front_indices:
                             ind = pop[idx]
-                            api_val = -objectives[idx, 0]
-                            tensile_val = -objectives[idx, 1]  # because we minimize -tensile
-                            efrf_val = objectives[idx, 2]
-                            pressure_val = ind[5]
-                            density_val = -objectives[idx, 0]  # same as api_val? Actually density is not directly from objectives; we need to compute from ind
-                            # Re-predict to get density, tensile, efrf accurately
+                            api_val = -objectives[idx, 0]  # actually density, but we'll recompute
+                            # Re-predict to get accurate values
                             d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, ind)
+                            pressure_val = ind[5]
                             candidates.append({
                                 'idx': idx,
                                 'ind': ind,
-                                'api': api_val,
+                                'density': d,
                                 'tensile': t,
                                 'efrf': ef,
                                 'pressure': pressure_val,
-                                'density': d,
                                 'disintegration': dis
                             })
 
-                        # Sort by balanced score: maximize API - 20*EFRF (you can adjust weights)
-                        candidates_sorted_bal = sorted(candidates, key=lambda x: x['api'] - 20*x['efrf'], reverse=True)
+                        # Sort by balanced score: maximize density - 20*efrf (adjust weights)
+                        candidates_sorted_bal = sorted(candidates, key=lambda x: x['density'] - 20*x['efrf'], reverse=True)
                         balanced = candidates_sorted_bal[0]
                         balanced_solution = balanced['ind']
 
                         # Quality: highest tensile
                         candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
                         quality = candidates_sorted_qual[0]
-                        # If quality is same as balanced, pick the second
                         if quality['idx'] == balanced['idx'] and len(candidates_sorted_qual) > 1:
                             quality = candidates_sorted_qual[1]
                         quality_solution = quality['ind']
 
-                        # Cost: lowest pressure (or highest API/pressure)
-                        candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])  # lowest pressure
+                        # Cost: lowest pressure
+                        candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
                         cost = candidates_sorted_cost[0]
                         if cost['idx'] == balanced['idx'] or cost['idx'] == quality['idx']:
-                            # find next that is distinct
                             for c in candidates_sorted_cost:
                                 if c['idx'] != balanced['idx'] and c['idx'] != quality['idx']:
                                     cost = c
@@ -1032,12 +1050,19 @@ def main():
                 st.markdown("### 📉 Pareto Front")
                 if fronts is not None and len(fronts) > 0 and len(fronts[0]) > 0:
                     st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
-                    balanced_efrf = None
-                    if balanced_solution is not None:
-                        _, _, _, ef, _, _, _ = predict_pinn(model, scaler, y_scaler, balanced_solution)
-                        balanced_efrf = (balanced_solution[0], ef)
+                    # Generate feasible region for plotting (density vs EFRF)
                     feasible_df = generate_feasible_points(model, scaler, y_scaler, n_samples=3000)
-                    fig = plot_pareto_clean(objectives, fronts, balanced_efrf, feasible_df, tested_point=(api_n, efrf), efrf_max=0.40)
+                    # Prepare tested point (density, efrf) for the initial formulation
+                    tested_density_efrf = (density, efrf)
+                    fig = plot_pareto_clean(
+                        objectives, fronts,
+                        balanced_solution=balanced_solution,
+                        feasible_df=feasible_df,
+                        tested_point=tested_density_efrf,
+                        model=model, scaler=scaler, y_scaler=y_scaler,
+                        cost_solution=cost_solution,
+                        quality_solution=quality_solution
+                    )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
 
