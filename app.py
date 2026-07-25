@@ -393,10 +393,27 @@ class NSGAIIOptimizer:
         return fitness
 
     def fast_non_dominated_sort(self, obj):
+        # BUGFIX (this was the cause of the RuntimeError crash on
+        # "optimizer.optimize(n_vars=8)"): this previously appended a
+        # SEPARATE single-element front (`fronts.append([i])`) for every
+        # individual with dom_count==0, instead of grouping all of them
+        # into one shared rank-0 front. Its cascading loop then processed
+        # only ONE of those singletons at a time and broke out entirely
+        # (`if not next_front: break`) the first time a single individual's
+        # dominated set failed to unlock anything — even though dozens of
+        # other rank-0 individuals, and every individual they dominate,
+        # were still sitting unprocessed. Most individuals in the
+        # population were never placed in any front at all. Downstream,
+        # `next(i for i, f in enumerate(fronts) if i1 in f)` in optimize()
+        # then raised StopIteration for any of those missing individuals —
+        # which, because optimize() is a generator (it contains `yield`),
+        # Python converts into a RuntimeError (PEP 479). Fixed to build one
+        # shared front per rank and only stop once every individual has
+        # been assigned.
         n = len(obj)
-        fronts = []
         dom_count = np.zeros(n, dtype=int)
         dom_sol = [[] for _ in range(n)]
+        first_front = []
         for i in range(n):
             for j in range(n):
                 if i == j:
@@ -406,19 +423,21 @@ class NSGAIIOptimizer:
                 elif np.all(obj[j] <= obj[i]) and np.any(obj[j] < obj[i]):
                     dom_count[i] += 1
             if dom_count[i] == 0:
-                fronts.append([i])
+                first_front.append(i)
+        fronts = [first_front]
         curr = 0
-        while True:
+        while curr < len(fronts) and fronts[curr]:
             next_front = []
             for i in fronts[curr]:
                 for j in dom_sol[i]:
                     dom_count[j] -= 1
                     if dom_count[j] == 0:
                         next_front.append(j)
-            if not next_front:
-                break
-            fronts.append(next_front)
             curr += 1
+            if next_front:
+                fronts.append(next_front)
+            else:
+                break
         return fronts
 
     def crowding_distance(self, obj, front):
