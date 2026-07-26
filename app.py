@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – SOFT CONSTRAINTS AS OBJECTIVE (SPREAD FRONT)
+# FINAL – DUAL PLOTS (API vs EFRF & API vs VIOLATION)
 # ================================================================
 
 import streamlit as st
@@ -61,7 +61,7 @@ FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
 # ================================================================
-# SESSION STATE
+# SESSION STATE (unchanged)
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -469,7 +469,7 @@ class NSGAIIOptimizer:
         ])
         return objectives, repaired, violation
 
-    # ---- Standard NSGA-II methods (unchanged) ----
+    # ---- Standard NSGA-II methods ----
     def _non_dominated_sort(self, objectives, violations):
         n = objectives.shape[0]
         fronts = []
@@ -481,7 +481,6 @@ class NSGAIIOptimizer:
                 for j in remaining:
                     if i == j:
                         continue
-                    # Use violations for constraint dominance: if j has lower violation, it dominates.
                     if (violations[j] < violations[i]) or \
                        (violations[j] == 0 and violations[i] == 0 and
                         np.all(objectives[j] <= objectives[i]) and
@@ -654,61 +653,74 @@ def predict_pinn(model, scaler, y_scaler, inputs):
 
 def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None,
-                      title="Pareto Front", efrf_threshold=0.40, show_violation=False):
+                      title="Pareto Front", efrf_threshold=0.40, y_axis='efrf'):
+    """
+    Plot Pareto front: either API vs EFRF or API vs Violation.
+    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
         api_vals = pop[front, 0]
-        efrf_vals = objectives[front, 2]
-        viol_vals = objectives[front, 5]  # violation objective
+        if y_axis == 'efrf':
+            y_vals = objectives[front, 2]
+            y_label = 'EFRF'
+            y_threshold = efrf_threshold
+            threshold_line = go.layout.Shape(type='line', y0=y_threshold, y1=y_threshold, x0=api_vals.min(), x1=api_vals.max(),
+                                             line=dict(dash='dash', color='gray'))
+            annotation_text = f'EFRF threshold ({efrf_threshold:.2f})'
+        else:  # violation
+            y_vals = objectives[front, 5]
+            y_label = 'Constraint Violation'
+            y_threshold = None
+            threshold_line = None
+            annotation_text = None
     except Exception:
         return None
 
     # Sort by API for line
     sorted_idx = np.argsort(api_vals)
     api_vals = api_vals[sorted_idx]
-    efrf_vals = efrf_vals[sorted_idx]
-    viol_vals = viol_vals[sorted_idx]
+    y_vals = y_vals[sorted_idx]
 
     fig = go.Figure()
 
-    # Color by violation: green if feasible (viol=0), else red
-    colors = ['green' if v < 1e-6 else 'red' for v in viol_vals]
     fig.add_trace(go.Scatter(
         x=api_vals,
-        y=efrf_vals,
-        mode='markers',
-        name='Pareto Front (color: violation)',
-        marker=dict(size=8, color=colors, line=dict(width=1, color='black')),
-        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Violation: %{customdata:.4f}<extra></extra>',
-        customdata=viol_vals
+        y=y_vals,
+        mode='lines+markers',
+        name='Pareto Front',
+        line=dict(color='red', width=2),
+        marker=dict(size=8, color='red'),
+        hovertemplate=f'API: %{{x:.1f}}%<br>{y_label}: %{{y:.4f}}<extra></extra>'
     ))
-    # Also add a line connecting feasible points if any
-    feasible_mask = viol_vals < 1e-6
-    if np.any(feasible_mask):
-        fig.add_trace(go.Scatter(
-            x=api_vals[feasible_mask],
-            y=efrf_vals[feasible_mask],
-            mode='lines+markers',
-            name='Feasible Pareto Front (viol=0)',
-            line=dict(color='green', width=2),
-            marker=dict(size=8, color='green'),
-            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
-        ))
 
-    # Selected solutions
+    # Add selected solutions
     def add_solution(solution, label, color, symbol):
         if solution is not None:
             api = solution[0]
-            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+            if y_axis == 'efrf':
+                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+                y_val = ef
+            else:
+                # compute violation for the solution
+                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+                viol = 0.0
+                viol += max(0, D_MIN - d) + max(0, d - D_MAX)
+                viol += max(0, TENSILE_MIN - t)
+                viol += max(0, ef - EFRF_MAX)
+                viol += max(0, dis - DISINTEGRATION_MAX)
+                # MCC is in solution[1]
+                mcc = solution[1]
+                viol += max(0, BOUND_MCC_MIN - mcc) + max(0, mcc - BOUND_MCC_MAX)
+                y_val = viol
             fig.add_trace(go.Scatter(
                 x=[api],
-                y=[ef],
+                y=[y_val],
                 mode='markers',
                 name=label,
                 marker=dict(size=14, color=color, symbol=symbol, line=dict(width=1, color='black')),
-                hovertemplate=f'{label}<br>API: {api:.1f}%<br>EFRF: {ef:.4f}<extra></extra>'
+                hovertemplate=f'{label}<br>API: {api:.1f}%<br>{y_label}: {y_val:.4f}<extra></extra>'
             ))
 
     add_solution(balanced_solution, '⚖️ Balanced', 'gold', 'star')
@@ -716,17 +728,27 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
     if tested_point is not None and len(tested_point) >= 2:
-        fig.add_trace(go.Scatter(
-            x=[tested_point[0]],
-            y=[tested_point[1]],
-            mode='markers',
-            name='Tested Formulation',
-            marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
-            hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
-        ))
+        # tested_point is (api, efrf) – for violation plot we need to compute violation
+        if y_axis == 'efrf':
+            y_test = tested_point[1]
+        else:
+            # we don't have density etc. so skip
+            y_test = None
+        if y_test is not None:
+            fig.add_trace(go.Scatter(
+                x=[tested_point[0]],
+                y=[y_test],
+                mode='markers',
+                name='Tested Formulation',
+                marker=dict(size=10, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
+                hovertemplate=f'Tested: API %{{x:.1f}}%, {y_label}: %{{y:.4f}}<extra></extra>'
+            ))
 
-    fig.add_hline(y=efrf_threshold, line_dash='dash', line_color='gray',
-                  annotation_text=f'EFRF threshold ({efrf_threshold:.2f})')
+    # Add threshold line for EFRF
+    if y_axis == 'efrf':
+        fig.add_hline(y=efrf_threshold, line_dash='dash', line_color='gray',
+                      annotation_text=f'EFRF threshold ({efrf_threshold:.2f})')
+
     fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
                   annotation_text=f'API min ({SLIDER_API_MIN}%)')
     fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
@@ -734,7 +756,7 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     fig.update_layout(
         title=title,
         xaxis_title='API (%)',
-        yaxis_title='EFRF',
+        yaxis_title=y_label,
         height=450,
         template='plotly_white',
         legend=dict(x=0.8, y=0.95)
@@ -973,8 +995,8 @@ def main():
                             'score': d - 20*ef - 0.01*p + 0.05*api_val
                         })
 
-                    # Filter feasible (violation == 0) for selection of balanced, quality, cost
-                    feasible_candidates = [c for c in candidates if c['violation'] < 1e-6]
+                    # Filter feasible (violation == 0) – use a small tolerance
+                    feasible_candidates = [c for c in candidates if c['violation'] < 1e-3]  # relaxed threshold
 
                     if feasible_candidates:
                         # Balanced: best score among feasible
@@ -1011,7 +1033,6 @@ def main():
                         candidates_sorted_viol = sorted(candidates, key=lambda x: x['violation'])
                         best_viol = candidates_sorted_viol[0]
                         balanced_solution = best_viol['ind']
-                        # fallback: quality = second, cost = third if available
                         if len(candidates_sorted_viol) > 1:
                             quality_solution = candidates_sorted_viol[1]['ind']
                         else:
@@ -1035,24 +1056,41 @@ def main():
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, cost_solution)
                         st.session_state.cost_pred = (d, t, e, ef, dis)
 
-                # ---- Show Pareto Front ----
-                st.markdown("### 📉 Pareto Front – API vs EFRF")
+                # ---- Show Two Pareto Fronts ----
+                st.markdown("### 📉 Pareto Fronts")
                 if fronts is not None and len(fronts[0]) > 0:
                     title = "Combined Pareto Front (Auto‑Explore)" if st.session_state.auto_explore else "Pareto Front"
                     st.success(f"✅ Pareto front: {len(fronts[0])} solutions")
-                    fig = plot_pareto_front(
+
+                    # Plot 1: API vs EFRF
+                    fig1 = plot_pareto_front(
                         objectives, fronts, pop,
                         balanced_solution=balanced_solution,
                         quality_solution=quality_solution,
                         cost_solution=cost_solution,
                         model=model, scaler=scaler, y_scaler=y_scaler,
                         tested_point=(api_n, efrf) if constraints_ok else None,
-                        title=title,
-                        efrf_threshold=EFRF_MAX
+                        title=f"{title} – API vs EFRF",
+                        y_axis='efrf'
                     )
-                    if fig is not None:
-                        st.plotly_chart(fig, use_container_width=True)
-                    st.caption("Green points satisfy all normal constraints (violation = 0).")
+                    if fig1 is not None:
+                        st.plotly_chart(fig1, use_container_width=True)
+                        st.caption("Green points (if any) satisfy all normal constraints (violation = 0).")
+
+                    # Plot 2: API vs Violation
+                    fig2 = plot_pareto_front(
+                        objectives, fronts, pop,
+                        balanced_solution=balanced_solution,
+                        quality_solution=quality_solution,
+                        cost_solution=cost_solution,
+                        model=model, scaler=scaler, y_scaler=y_scaler,
+                        tested_point=None,  # no tested point for violation plot
+                        title=f"{title} – API vs Violation",
+                        y_axis='violation'
+                    )
+                    if fig2 is not None:
+                        st.plotly_chart(fig2, use_container_width=True)
+                        st.caption("Lower violation is better; zero violation means all constraints are satisfied.")
 
                 # ---- Show Solutions Table ----
                 st.markdown("### 📊 Optimal Solutions Comparison")
