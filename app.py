@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – ADJUSTABLE CONSTRAINTS + AUTO‑EXPLORE
+# FINAL – FIXED PARETO PLOT (USES SLIDER EFRF THRESHOLD)
 # ================================================================
 
 import streamlit as st
@@ -662,7 +662,11 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
 def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
-                      model=None, scaler=None, y_scaler=None, tested_point=None, title="Pareto Front"):
+                      model=None, scaler=None, y_scaler=None, tested_point=None,
+                      title="Pareto Front", efrf_threshold=0.40):
+    """
+    Plot Pareto front with user-defined EFRF threshold.
+    """
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -715,8 +719,9 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
             hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
 
-    fig.add_hline(y=EFRF_MAX, line_dash='dash', line_color='gray',
-                  annotation_text='EFRF threshold (0.40)')
+    # Use the threshold passed in (from slider)
+    fig.add_hline(y=efrf_threshold, line_dash='dash', line_color='gray',
+                  annotation_text=f'EFRF threshold ({efrf_threshold:.2f})')
     fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
                   annotation_text=f'API min ({SLIDER_API_MIN}%)')
     fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
@@ -744,8 +749,6 @@ def combine_pareto_fronts(all_results):
         return None, None, None
     combined_pop = np.vstack(combined_pop)
     combined_objectives = np.vstack(combined_objectives)
-    # Simple non-dominated sorting on combined set
-    # We'll create a single front with all points.
     combined_fronts = [list(range(len(combined_pop)))]
     return combined_pop, combined_objectives, combined_fronts
 
@@ -1066,7 +1069,8 @@ def main():
                         cost_solution=cost_solution,
                         model=model, scaler=scaler, y_scaler=y_scaler,
                         tested_point=(api_n, efrf) if constraints_ok else None,
-                        title=title
+                        title=title,
+                        efrf_threshold=efrf_max   # pass the slider value
                     )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
