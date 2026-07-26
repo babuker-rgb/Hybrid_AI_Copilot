@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – DUAL PLOTS (API vs EFRF & API vs VIOLATION)
+# FINAL – SPREAD FRONT WITH RELAX TOGGLE + INCREASED DIVERSITY
 # ================================================================
 
 import streamlit as st
@@ -24,7 +24,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Hybrid AI · Tablet Optimization v29.28‑R32", layout="wide")
 
 # ================================================================
-# CONSTANTS (normal ranges)
+# CONSTANTS (default normal ranges)
 # ================================================================
 D_MIN, D_MAX = 0.72, 0.99
 TENSILE_MIN = 1.50
@@ -53,15 +53,16 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-BASE_POP = 80
-BASE_GENS = 60
+# Increased pop/gens for diversity
+NSGA_POP = 100
+NSGA_GENS = 60
 HIDDEN_SIZE = 512
 
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
 
 # ================================================================
-# SESSION STATE (unchanged)
+# SESSION STATE
 # ================================================================
 if 'api' not in st.session_state:
     st.session_state.update({
@@ -81,6 +82,7 @@ if 'api' not in st.session_state:
         'explore_min_api': 80.0,
         'explore_max_api': 98.0,
         'explore_steps': 5,
+        'relax_constraints': False,
     })
 
 # ================================================================
@@ -353,12 +355,13 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – 6 OBJECTIVES (soft constraints)
+# NSGA-II OPTIMIZER – with diversity enhancements and relaxed constraints
 # ================================================================
 class NSGAIIOptimizer:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=80, gens=60,
-                 granule_fixed=True, granule_fixed_val=125.0, api_objective='Minimize (Cost)',
-                 max_api=98.0):
+    def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
+                 granule_fixed=True, granule_fixed_val=125.0,
+                 api_objective='Minimize (Cost)', max_api=98.0,
+                 relax=False):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -369,6 +372,7 @@ class NSGAIIOptimizer:
         self.granule_fixed_val = granule_fixed_val
         self.api_objective = api_objective
         self.max_api = max_api
+        self.relax = relax
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -446,10 +450,24 @@ class NSGAIIOptimizer:
 
         # ---- Constraint violation (soft) ----
         violation = np.zeros(n)
-        violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
-        violation += np.maximum(0, TENSILE_MIN - tensile)
-        violation += np.maximum(0, efrf - EFRF_MAX)
-        violation += np.maximum(0, disintegration - DISINTEGRATION_MAX)
+        if self.relax:
+            # Relaxed constraints: lower density/tensile, higher EFRF
+            d_min = 0.50
+            d_max = 0.99
+            tensile_min = 0.20
+            efrf_max = 0.80
+            dis_max = 30.0
+        else:
+            d_min = D_MIN
+            d_max = D_MAX
+            tensile_min = TENSILE_MIN
+            efrf_max = EFRF_MAX
+            dis_max = DISINTEGRATION_MAX
+
+        violation += np.maximum(0, d_min - density) + np.maximum(0, density - d_max)
+        violation += np.maximum(0, tensile_min - tensile)
+        violation += np.maximum(0, efrf - efrf_max)
+        violation += np.maximum(0, disintegration - dis_max)
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
@@ -465,11 +483,11 @@ class NSGAIIOptimizer:
             efrf,
             pressure,
             api_obj,
-            violation          # minimise violation
+            violation
         ])
         return objectives, repaired, violation
 
-    # ---- Standard NSGA-II methods ----
+    # ---- Standard NSGA-II methods (unchanged) ----
     def _non_dominated_sort(self, objectives, violations):
         n = objectives.shape[0]
         fronts = []
@@ -552,7 +570,11 @@ class NSGAIIOptimizer:
         rng = np.random.default_rng()
         pop = []
         for _ in range(self.pop_size):
+            # Expanded initialization with noise
             api = rng.uniform(SLIDER_API_MIN, self.max_api)
+            # Add small noise for diversity
+            api += rng.normal(0, 0.3)
+            api = np.clip(api, SLIDER_API_MIN, self.max_api)
             mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
             binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX)
             pvpp = rng.uniform(BOUND_PVPP_MIN, BOUND_PVPP_MAX)
@@ -563,7 +585,7 @@ class NSGAIIOptimizer:
             granule = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX)
             particle_size = rng.uniform(SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
             binder_grade = rng.integers(0, len(BINDER_GRADES))
-            dwell_time = rng.uniform(SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX)
+            dwell_time = calculate_dwell_time(speed)
             friction = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
             decompression_time = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
             ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
@@ -653,10 +675,7 @@ def predict_pinn(model, scaler, y_scaler, inputs):
 
 def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None,
-                      title="Pareto Front", efrf_threshold=0.40, y_axis='efrf'):
-    """
-    Plot Pareto front: either API vs EFRF or API vs Violation.
-    """
+                      title="Pareto Front", y_axis='efrf', efrf_threshold=0.40):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
@@ -665,35 +684,44 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
         if y_axis == 'efrf':
             y_vals = objectives[front, 2]
             y_label = 'EFRF'
-            y_threshold = efrf_threshold
-            threshold_line = go.layout.Shape(type='line', y0=y_threshold, y1=y_threshold, x0=api_vals.min(), x1=api_vals.max(),
-                                             line=dict(dash='dash', color='gray'))
-            annotation_text = f'EFRF threshold ({efrf_threshold:.2f})'
-        else:  # violation
+        else:
             y_vals = objectives[front, 5]
             y_label = 'Constraint Violation'
-            y_threshold = None
-            threshold_line = None
-            annotation_text = None
     except Exception:
         return None
 
-    # Sort by API for line
     sorted_idx = np.argsort(api_vals)
     api_vals = api_vals[sorted_idx]
     y_vals = y_vals[sorted_idx]
 
     fig = go.Figure()
 
+    # Color by violation (red if >0, green if feasible)
+    viol_vals = objectives[front, 5]
+    viol_vals = viol_vals[sorted_idx]
+    colors = ['green' if v < 1e-3 else 'red' for v in viol_vals]
+
     fig.add_trace(go.Scatter(
         x=api_vals,
         y=y_vals,
-        mode='lines+markers',
+        mode='markers+lines',
         name='Pareto Front',
-        line=dict(color='red', width=2),
-        marker=dict(size=8, color='red'),
+        line=dict(color='red', width=1, dash='dot'),
+        marker=dict(size=8, color=colors, line=dict(width=1, color='black')),
         hovertemplate=f'API: %{{x:.1f}}%<br>{y_label}: %{{y:.4f}}<extra></extra>'
     ))
+
+    # Add feasible points as separate trace
+    feasible_mask = viol_vals < 1e-3
+    if np.any(feasible_mask):
+        fig.add_trace(go.Scatter(
+            x=api_vals[feasible_mask],
+            y=y_vals[feasible_mask],
+            mode='markers',
+            name='Feasible (viol=0)',
+            marker=dict(size=10, color='green', symbol='circle', line=dict(width=1, color='darkgreen')),
+            hovertemplate=f'API: %{{x:.1f}}%<br>{y_label}: %{{y:.4f}}<extra></extra>'
+        ))
 
     # Add selected solutions
     def add_solution(solution, label, color, symbol):
@@ -703,14 +731,12 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
                 d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
                 y_val = ef
             else:
-                # compute violation for the solution
                 d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
                 viol = 0.0
                 viol += max(0, D_MIN - d) + max(0, d - D_MAX)
                 viol += max(0, TENSILE_MIN - t)
                 viol += max(0, ef - EFRF_MAX)
                 viol += max(0, dis - DISINTEGRATION_MAX)
-                # MCC is in solution[1]
                 mcc = solution[1]
                 viol += max(0, BOUND_MCC_MIN - mcc) + max(0, mcc - BOUND_MCC_MAX)
                 y_val = viol
@@ -728,11 +754,9 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     add_solution(cost_solution, '💰 Cost', 'orange', 'square')
 
     if tested_point is not None and len(tested_point) >= 2:
-        # tested_point is (api, efrf) – for violation plot we need to compute violation
         if y_axis == 'efrf':
             y_test = tested_point[1]
         else:
-            # we don't have density etc. so skip
             y_test = None
         if y_test is not None:
             fig.add_trace(go.Scatter(
@@ -744,11 +768,9 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
                 hovertemplate=f'Tested: API %{{x:.1f}}%, {y_label}: %{{y:.4f}}<extra></extra>'
             ))
 
-    # Add threshold line for EFRF
     if y_axis == 'efrf':
         fig.add_hline(y=efrf_threshold, line_dash='dash', line_color='gray',
                       annotation_text=f'EFRF threshold ({efrf_threshold:.2f})')
-
     fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
                   annotation_text=f'API min ({SLIDER_API_MIN}%)')
     fig.add_vline(x=SLIDER_API_MAX, line_dash='dot', line_color='gray',
@@ -853,6 +875,14 @@ def main():
         st.session_state.max_api = max_api
         st.caption(f"API capped at {max_api:.1f}%.")
 
+        st.markdown("### ⚙️ Relax Constraints (Spread Front)")
+        relax = st.checkbox("Relax constraints (lower density/tensile, higher EFRF)", value=st.session_state.get('relax_constraints', False))
+        st.session_state.relax_constraints = relax
+        if relax:
+            st.info("Constraints relaxed: density ≥0.50, tensile ≥0.20, EFRF ≤0.80. This will show the full trade‑off curve.")
+        else:
+            st.info("Normal constraints: density ≥0.72, tensile ≥1.5, EFRF ≤0.40. Front will be vertical (feasible region).")
+
         st.markdown("### ⚙️ Auto‑Explore API Range")
         auto_explore = st.checkbox("Auto‑explore (multiple runs)", value=st.session_state.get('auto_explore', False))
         st.session_state.auto_explore = auto_explore
@@ -864,10 +894,6 @@ def main():
             st.session_state.explore_max_api = explore_max
             st.session_state.explore_steps = explore_steps
             st.caption(f"Running {explore_steps} optimisations with different API caps.")
-
-        st.markdown("### ⚙️ Normal Constraints (hard limits)")
-        st.info("Density: 0.72–0.99 | Tensile ≥ 1.5 | EFRF < 0.4 | Disintegration ≤ 15 | MCC 2–8%")
-        st.caption("Violation is minimised as an objective; green points on the front are feasible.")
 
         predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -933,11 +959,12 @@ def main():
                         with st.spinner(f"Running NSGA‑II with max API = {cap:.1f}% ..."):
                             nsga = NSGAIIOptimizer(
                                 model, scaler, y_scaler, bounds,
-                                pop=BASE_POP, gens=BASE_GENS,
+                                pop=NSGA_POP, gens=NSGA_GENS,
                                 granule_fixed=granule_fixed,
                                 granule_fixed_val=granule_use,
                                 api_objective=api_obj,
-                                max_api=cap
+                                max_api=cap,
+                                relax=relax
                             )
                             pop, objectives, fronts, violations = nsga.run()
                             all_results.append((pop, objectives, fronts, violations))
@@ -953,14 +980,15 @@ def main():
                         st.error("No results from auto-explore.")
                         return
                 else:
-                    with st.spinner(f"Running NSGA‑II (pop={BASE_POP}, gens={BASE_GENS}) ..."):
+                    with st.spinner(f"Running NSGA‑II (pop={NSGA_POP}, gens={NSGA_GENS}) ..."):
                         nsga = NSGAIIOptimizer(
                             model, scaler, y_scaler, bounds,
-                            pop=BASE_POP, gens=BASE_GENS,
+                            pop=NSGA_POP, gens=NSGA_GENS,
                             granule_fixed=granule_fixed,
                             granule_fixed_val=granule_use,
                             api_objective=api_obj,
-                            max_api=max_api
+                            max_api=max_api,
+                            relax=relax
                         )
                         pop, objectives, fronts, violations = nsga.run()
 
@@ -995,17 +1023,15 @@ def main():
                             'score': d - 20*ef - 0.01*p + 0.05*api_val
                         })
 
-                    # Filter feasible (violation == 0) – use a small tolerance
-                    feasible_candidates = [c for c in candidates if c['violation'] < 1e-3]  # relaxed threshold
+                    # Filter feasible (violation == 0) – relaxed threshold
+                    feasible_candidates = [c for c in candidates if c['violation'] < 1e-3]
 
                     if feasible_candidates:
-                        # Balanced: best score among feasible
                         candidates_sorted_bal = sorted(feasible_candidates, key=lambda x: x['score'], reverse=True)
                         balanced = candidates_sorted_bal[0]
                         balanced_solution = balanced['ind']
                         balanced_idx = balanced['idx']
 
-                        # Quality: highest tensile among feasible, different from balanced
                         candidates_sorted_qual = sorted(feasible_candidates, key=lambda x: x['tensile'], reverse=True)
                         quality = None
                         for c in candidates_sorted_qual:
@@ -1017,7 +1043,6 @@ def main():
                         quality_solution = quality['ind']
                         quality_idx = quality['idx']
 
-                        # Cost: lowest pressure among feasible, different from both
                         candidates_sorted_cost = sorted(feasible_candidates, key=lambda x: x['pressure'])
                         cost = None
                         for c in candidates_sorted_cost:
@@ -1028,7 +1053,6 @@ def main():
                             cost = candidates_sorted_bal[2] if len(candidates_sorted_bal) > 2 else balanced
                         cost_solution = cost['ind']
                     else:
-                        # No feasible solutions – pick from all with lowest violation
                         st.warning("No fully feasible solutions found; showing least-violating.")
                         candidates_sorted_viol = sorted(candidates, key=lambda x: x['violation'])
                         best_viol = candidates_sorted_viol[0]
@@ -1071,11 +1095,12 @@ def main():
                         model=model, scaler=scaler, y_scaler=y_scaler,
                         tested_point=(api_n, efrf) if constraints_ok else None,
                         title=f"{title} – API vs EFRF",
-                        y_axis='efrf'
+                        y_axis='efrf',
+                        efrf_threshold=EFRF_MAX
                     )
                     if fig1 is not None:
                         st.plotly_chart(fig1, use_container_width=True)
-                        st.caption("Green points (if any) satisfy all normal constraints (violation = 0).")
+                        st.caption("Green points satisfy all normal constraints (violation = 0).")
 
                     # Plot 2: API vs Violation
                     fig2 = plot_pareto_front(
@@ -1084,7 +1109,7 @@ def main():
                         quality_solution=quality_solution,
                         cost_solution=cost_solution,
                         model=model, scaler=scaler, y_scaler=y_scaler,
-                        tested_point=None,  # no tested point for violation plot
+                        tested_point=None,
                         title=f"{title} – API vs Violation",
                         y_axis='violation'
                     )
