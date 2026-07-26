@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – DIVERSE API SPREAD + RELAX TOGGLE
+# FINAL – 3D PARETO FRONT (API vs EFRF vs DISINTEGRATION)
 # ================================================================
 
 import streamlit as st
@@ -14,6 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_squared_error
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import os
 import warnings
 warnings.filterwarnings('ignore')
@@ -24,7 +25,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Hybrid AI · Tablet Optimization v29.28‑R32", layout="wide")
 
 # ================================================================
-# CONSTANTS (default normal ranges)
+# CONSTANTS
 # ================================================================
 D_MIN, D_MAX = 0.72, 0.99
 TENSILE_MIN = 1.50
@@ -53,12 +54,10 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# Enhanced NSGA‑II parameters (increased pop/gens)
 NSGA_POP = 100
 NSGA_GENS = 60
 HIDDEN_SIZE = 512
 
-# Penalty weights for objectives
 PENALTY_API = 0.05
 PENALTY_TENSILE = 0.04
 PENALTY_EFRF = 0.06
@@ -88,6 +87,7 @@ if 'api' not in st.session_state:
         'explore_max_api': 98.0,
         'explore_steps': 5,
         'relax_constraints': False,
+        'view_3d': True,
     })
 
 # ================================================================
@@ -360,13 +360,12 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER – with diversity enhancements and relaxed constraints
+# NSGA-II OPTIMIZER – 3 OBJECTIVES (API, EFRF, Disintegration)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
                  granule_fixed=True, granule_fixed_val=125.0,
-                 api_objective='Minimize (Cost)', max_api=98.0,
-                 relax=False,
+                 max_api=98.0, relax=False,
                  penalty_api=PENALTY_API, penalty_tensile=PENALTY_TENSILE, penalty_efrf=PENALTY_EFRF):
         self.model = model
         self.scaler = scaler
@@ -376,7 +375,6 @@ class NSGAIIOptimizer:
         self.generations = gens
         self.granule_fixed = granule_fixed
         self.granule_fixed_val = granule_fixed_val
-        self.api_objective = api_objective
         self.max_api = max_api
         self.relax = relax
         self.penalty_api = penalty_api
@@ -454,8 +452,8 @@ class NSGAIIOptimizer:
         disintegration = pred[:, 3]
 
         efrf = er / np.maximum(tensile, 1e-4)
-        pressure = repaired[:, 5]
         api = repaired[:, 0]
+        pressure = repaired[:, 5]  # kept for later selection
 
         # ---- Constraint violation (soft) ----
         violation = np.zeros(n)
@@ -479,52 +477,13 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # ---- Objectives (6 objectives) + soft penalties ----
-        if self.api_objective == 'Maximize (Quality)':
-            api_obj = -api
-        else:
-            api_obj = api
-
-        # Add penalties for low API, low tensile, high EFRF (as extra objective contributions)
-        # These are added to the corresponding objectives (density, tensile, efrf) to push
-        # solutions away from extreme values.
-        # However, to keep the Pareto front diverse, we add them as separate penalty terms
-        # that are summed into the violation or as additional objectives.
-        # Here we incorporate them into the violation to softly discourage.
-        # Alternatively, we could add them as separate objectives.
-        # For simplicity, we add them to the violation (so they become part of the constraint handling).
-        # But to match the user's snippet, we can add them to the objective values directly.
-        # Let's add them to the first three objectives (density, tensile, efrf) as small adjustments.
-        # Actually, the snippet uses penalty_api, penalty_tensile, penalty_efrf as weights
-        # added to the objectives. We'll do that by modifying the objectives array.
-        # We'll subtract penalties for low API (since we want to maximize API, we penalize low API)
-        # and for low tensile, and add penalty for high efrf.
-        # We'll apply these penalties to the objectives that are being minimized.
-        # For density objective (minimize -density), we want to penalize low density, which is already
-        # covered by violation. For tensile, we penalize low tensile (since we minimize -tensile).
-        # For efrf, we penalize high efrf.
-        # We'll add these as soft penalties to the objectives themselves.
-
-        # Compute normalized penalties
-        api_norm = (api - SLIDER_API_MIN) / (SLIDER_API_MAX - SLIDER_API_MIN)
-        tensile_norm = tensile / 8.5  # rough max tensile
-        efrf_norm = efrf / EFRF_MAX   # normalized to threshold
-
-        penalty_api_vec = self.penalty_api * (1 - api_norm) * 0.1  # small effect
-        penalty_tensile_vec = self.penalty_tensile * (1 - tensile_norm) * 0.1
-        penalty_efrf_vec = self.penalty_efrf * efrf_norm * 0.1
-
-        # Apply penalties to the corresponding objectives (which are being minimized)
-        # density objective: -density, so we add penalty to increase it (make it worse)
+        # ---- Three objectives: -API (max), EFRF (min), Disintegration (min) ----
         objectives = np.column_stack([
-            -density + penalty_api_vec,        # penalty for low API
-            -tensile + penalty_tensile_vec,    # penalty for low tensile
-            efrf + penalty_efrf_vec,           # penalty for high EFRF
-            pressure,
-            api_obj,
-            violation
+            -api,            # maximise API (minimise negative)
+            efrf,            # minimise EFRF
+            disintegration   # minimise disintegration time
         ])
-        return objectives, repaired, violation
+        return objectives, repaired, violation, pressure
 
     # ---- Standard NSGA-II methods (unchanged) ----
     def _non_dominated_sort(self, objectives, violations):
@@ -609,7 +568,6 @@ class NSGAIIOptimizer:
         rng = np.random.default_rng()
         pop = []
         for _ in range(self.pop_size):
-            # Expanded API range with noise for diversity
             api = rng.uniform(SLIDER_API_MIN, self.max_api)
             api += rng.normal(0, 0.3)
             api = np.clip(api, SLIDER_API_MIN, self.max_api)
@@ -626,7 +584,6 @@ class NSGAIIOptimizer:
             dwell_time = calculate_dwell_time(speed)
             friction = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
             decompression_time = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
-            # Add small noise to other variables as well (optional)
             binder += rng.normal(0, 0.1)
             pvpp += rng.normal(0, 0.1)
             ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
@@ -635,7 +592,7 @@ class NSGAIIOptimizer:
         pop = np.array(pop)
 
         for gen in range(self.generations):
-            objectives, pop, violations = self._evaluate(pop)
+            objectives, pop, violations, pressure = self._evaluate(pop)
             fronts = self._non_dominated_sort(objectives, violations)
             crowding_dist = {}
             for front in fronts:
@@ -655,7 +612,7 @@ class NSGAIIOptimizer:
             offspring = np.array(offspring[:self.pop_size])
 
             combined = np.vstack([pop, offspring])
-            obj_comb, combined, viol_comb = self._evaluate(combined)
+            obj_comb, combined, viol_comb, press_comb = self._evaluate(combined)
             fronts_comb = self._non_dominated_sort(obj_comb, viol_comb)
             crowding_comb = {}
             for front in fronts_comb:
@@ -675,9 +632,9 @@ class NSGAIIOptimizer:
                     break
             pop = np.array(new_pop)
 
-        objectives, pop, violations = self._evaluate(pop)
+        objectives, pop, violations, pressure = self._evaluate(pop)
         fronts = self._non_dominated_sort(objectives, violations)
-        return pop, objectives, fronts, violations
+        return pop, objectives, fronts, violations, pressure
 
 # ================================================================
 # PREDICTION AND PLOTTING
@@ -714,20 +671,20 @@ def predict_pinn(model, scaler, y_scaler, inputs):
         st.error(f"Prediction error: {e}")
         return 0.72, 2.0, 0.5, 0.25, 10.0, 10.0, 1.0
 
-def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
-                      model=None, scaler=None, y_scaler=None, tested_point=None,
-                      title="Pareto Front", y_axis='efrf', efrf_threshold=0.40):
+def plot_2d_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
+                  model=None, scaler=None, y_scaler=None, tested_point=None,
+                  title="Pareto Front", y_axis='efrf', efrf_threshold=0.40):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
         api_vals = pop[front, 0]
         if y_axis == 'efrf':
-            y_vals = objectives[front, 2]
+            y_vals = objectives[front, 1]   # EFRF
             y_label = 'EFRF'
         else:
-            y_vals = objectives[front, 5]
-            y_label = 'Constraint Violation'
+            y_vals = objectives[front, 2]   # Disintegration
+            y_label = 'Disintegration (min)'
     except Exception:
         return None
 
@@ -737,50 +694,24 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
 
     fig = go.Figure()
 
-    # Color by violation (red if >0, green if feasible)
-    viol_vals = objectives[front, 5]
-    viol_vals = viol_vals[sorted_idx]
-    colors = ['green' if v < 1e-3 else 'red' for v in viol_vals]
-
     fig.add_trace(go.Scatter(
         x=api_vals,
         y=y_vals,
         mode='markers+lines',
         name='Pareto Front',
         line=dict(color='red', width=1, dash='dot'),
-        marker=dict(size=8, color=colors, line=dict(width=1, color='black')),
+        marker=dict(size=8, color='red'),
         hovertemplate=f'API: %{{x:.1f}}%<br>{y_label}: %{{y:.4f}}<extra></extra>'
     ))
 
-    # Add feasible points as separate trace
-    feasible_mask = viol_vals < 1e-3
-    if np.any(feasible_mask):
-        fig.add_trace(go.Scatter(
-            x=api_vals[feasible_mask],
-            y=y_vals[feasible_mask],
-            mode='markers',
-            name='Feasible (viol=0)',
-            marker=dict(size=10, color='green', symbol='circle', line=dict(width=1, color='darkgreen')),
-            hovertemplate=f'API: %{{x:.1f}}%<br>{y_label}: %{{y:.4f}}<extra></extra>'
-        ))
-
-    # Add selected solutions
     def add_solution(solution, label, color, symbol):
         if solution is not None:
             api = solution[0]
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
             if y_axis == 'efrf':
-                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
                 y_val = ef
             else:
-                d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
-                viol = 0.0
-                viol += max(0, D_MIN - d) + max(0, d - D_MAX)
-                viol += max(0, TENSILE_MIN - t)
-                viol += max(0, ef - EFRF_MAX)
-                viol += max(0, dis - DISINTEGRATION_MAX)
-                mcc = solution[1]
-                viol += max(0, BOUND_MCC_MIN - mcc) + max(0, mcc - BOUND_MCC_MAX)
-                y_val = viol
+                y_val = dis
             fig.add_trace(go.Scatter(
                 x=[api],
                 y=[y_val],
@@ -798,7 +729,7 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
         if y_axis == 'efrf':
             y_test = tested_point[1]
         else:
-            y_test = None
+            y_test = tested_point[2] if len(tested_point) > 2 else None
         if y_test is not None:
             fig.add_trace(go.Scatter(
                 x=[tested_point[0]],
@@ -826,20 +757,89 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     )
     return fig
 
+def plot_3d_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
+                  model=None, scaler=None, y_scaler=None, tested_point=None,
+                  title="3D Pareto Front"):
+    if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
+        return None
+    front = fronts[0]
+    try:
+        api_vals = pop[front, 0]
+        efrf_vals = objectives[front, 1]
+        dis_vals = objectives[front, 2]
+    except Exception:
+        return None
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter3d(
+        x=api_vals,
+        y=efrf_vals,
+        z=dis_vals,
+        mode='markers',
+        name='Pareto Front',
+        marker=dict(size=5, color='red', opacity=0.6),
+        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Disintegration: %{z:.2f} min<extra></extra>'
+    ))
+
+    def add_solution_3d(solution, label, color, symbol):
+        if solution is not None:
+            api = solution[0]
+            d, t, e, ef, dis, tau, beta = predict_pinn(model, scaler, y_scaler, solution)
+            fig.add_trace(go.Scatter3d(
+                x=[api],
+                y=[ef],
+                z=[dis],
+                mode='markers',
+                name=label,
+                marker=dict(size=10, color=color, symbol=symbol, line=dict(width=1, color='black')),
+                hovertemplate=f'{label}<br>API: {api:.1f}%<br>EFRF: {ef:.4f}<br>Disintegration: {dis:.2f} min<extra></extra>'
+            ))
+
+    add_solution_3d(balanced_solution, '⚖️ Balanced', 'gold', 'star')
+    add_solution_3d(quality_solution, '🏆 Quality', 'green', 'diamond')
+    add_solution_3d(cost_solution, '💰 Cost', 'orange', 'square')
+
+    if tested_point is not None and len(tested_point) >= 3:
+        fig.add_trace(go.Scatter3d(
+            x=[tested_point[0]],
+            y=[tested_point[1]],
+            z=[tested_point[2]],
+            mode='markers',
+            name='Tested Formulation',
+            marker=dict(size=8, color='blue', symbol='circle', line=dict(width=2, color='darkblue')),
+            hovertemplate=f'Tested: API %{{x:.1f}}%, EFRF %{{y:.4f}}, Disintegration %{{z:.2f}} min<extra></extra>'
+        ))
+
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis_title='API (%)',
+            yaxis_title='EFRF',
+            zaxis_title='Disintegration (min)'
+        ),
+        height=600,
+        template='plotly_white'
+    )
+    return fig
+
 def combine_pareto_fronts(all_results):
     combined_pop = []
     combined_objectives = []
-    for pop, objectives, fronts, _ in all_results:
+    combined_pressure = []
+    for pop, objectives, fronts, violations, pressure in all_results:
         if fronts and len(fronts[0]) > 0:
             front_idx = fronts[0]
             combined_pop.append(pop[front_idx])
             combined_objectives.append(objectives[front_idx])
+            combined_pressure.append(pressure[front_idx])
     if not combined_pop:
-        return None, None, None
+        return None, None, None, None
     combined_pop = np.vstack(combined_pop)
     combined_objectives = np.vstack(combined_objectives)
+    combined_pressure = np.concatenate(combined_pressure)
     combined_fronts = [list(range(len(combined_pop)))]
-    return combined_pop, combined_objectives, combined_fronts
+    return combined_pop, combined_objectives, combined_fronts, combined_pressure
 
 # ================================================================
 # MAIN
@@ -894,16 +894,6 @@ def main():
                 friction = st.slider("Friction", SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, st.session_state.friction, 0.01, key="friction")
                 decompression_time = st.slider("Decompression Time (ms)", SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, st.session_state.decompression_time, 1.0, key="decompression_time")
 
-        st.markdown("### ⚙️ API Objective Direction")
-        current_obj = st.session_state.get('api_objective', 'Minimize (Cost)')
-        api_obj = st.radio(
-            "API Objective:",
-            options=["Maximize (Quality)", "Minimize (Cost)"],
-            index=0 if current_obj == "Maximize (Quality)" else 1,
-            key="api_objective_radio"
-        )
-        st.session_state.api_objective = api_obj
-
         st.markdown("### ⚙️ Max API for Optimisation")
         max_api = st.slider(
             "Max API (%) for NSGA‑II",
@@ -914,15 +904,10 @@ def main():
             key="max_api_slider"
         )
         st.session_state.max_api = max_api
-        st.caption(f"API capped at {max_api:.1f}%.")
 
         st.markdown("### ⚙️ Relax Constraints (Spread Front)")
         relax = st.checkbox("Relax constraints (lower density/tensile, higher EFRF)", value=st.session_state.get('relax_constraints', False))
         st.session_state.relax_constraints = relax
-        if relax:
-            st.info("Constraints relaxed: density ≥0.50, tensile ≥0.20, EFRF ≤0.80. This will show the full trade‑off curve.")
-        else:
-            st.info("Normal constraints: density ≥0.72, tensile ≥1.5, EFRF ≤0.40. Front will be vertical (feasible region).")
 
         st.markdown("### ⚙️ Auto‑Explore API Range")
         auto_explore = st.checkbox("Auto‑explore (multiple runs)", value=st.session_state.get('auto_explore', False))
@@ -934,7 +919,10 @@ def main():
             st.session_state.explore_min_api = explore_min
             st.session_state.explore_max_api = explore_max
             st.session_state.explore_steps = explore_steps
-            st.caption(f"Running {explore_steps} optimisations with different API caps.")
+
+        st.markdown("### ⚙️ Plot Options")
+        view_3d = st.checkbox("Show 3D Pareto Front", value=st.session_state.get('view_3d', True))
+        st.session_state.view_3d = view_3d
 
         predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -1003,19 +991,19 @@ def main():
                                 pop=NSGA_POP, gens=NSGA_GENS,
                                 granule_fixed=granule_fixed,
                                 granule_fixed_val=granule_use,
-                                api_objective=api_obj,
                                 max_api=cap,
                                 relax=relax
                             )
-                            pop, objectives, fronts, violations = nsga.run()
-                            all_results.append((pop, objectives, fronts, violations))
+                            pop, objectives, fronts, violations, pressure = nsga.run()
+                            all_results.append((pop, objectives, fronts, violations, pressure))
                         progress_bar.progress((i+1)/len(caps))
                     progress_bar.empty()
-                    combined_pop, combined_obj, combined_fronts = combine_pareto_fronts(all_results)
+                    combined_pop, combined_obj, combined_fronts, combined_press = combine_pareto_fronts(all_results)
                     if combined_pop is not None:
                         pop = combined_pop
                         objectives = combined_obj
                         fronts = combined_fronts
+                        pressure_vals = combined_press
                         st.success(f"✅ Combined Pareto front: {len(combined_pop)} solutions from {len(caps)} runs.")
                     else:
                         st.error("No results from auto-explore.")
@@ -1027,11 +1015,10 @@ def main():
                             pop=NSGA_POP, gens=NSGA_GENS,
                             granule_fixed=granule_fixed,
                             granule_fixed_val=granule_use,
-                            api_objective=api_obj,
                             max_api=max_api,
                             relax=relax
                         )
-                        pop, objectives, fronts, violations = nsga.run()
+                        pop, objectives, fronts, violations, pressure_vals = nsga.run()
 
                 st.session_state.nsga_pop = pop
                 st.session_state.nsga_objectives = objectives
@@ -1050,7 +1037,7 @@ def main():
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, ind)
                         p = ind[5]
                         api_val = ind[0]
-                        viol = objectives[idx, 5]  # violation objective
+                        viol = violations[idx]
                         candidates.append({
                             'idx': idx,
                             'ind': ind,
@@ -1064,7 +1051,6 @@ def main():
                             'score': d - 20*ef - 0.01*p + 0.05*api_val
                         })
 
-                    # Filter feasible (violation == 0) – relaxed threshold
                     feasible_candidates = [c for c in candidates if c['violation'] < 1e-3]
 
                     if feasible_candidates:
@@ -1121,42 +1107,55 @@ def main():
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, cost_solution)
                         st.session_state.cost_pred = (d, t, e, ef, dis)
 
-                # ---- Show Two Pareto Fronts ----
+                # ---- Show Pareto Front ----
                 st.markdown("### 📉 Pareto Fronts")
                 if fronts is not None and len(fronts[0]) > 0:
                     title = "Combined Pareto Front (Auto‑Explore)" if st.session_state.auto_explore else "Pareto Front"
                     st.success(f"✅ Pareto front: {len(fronts[0])} solutions")
 
-                    # Plot 1: API vs EFRF
-                    fig1 = plot_pareto_front(
-                        objectives, fronts, pop,
-                        balanced_solution=balanced_solution,
-                        quality_solution=quality_solution,
-                        cost_solution=cost_solution,
-                        model=model, scaler=scaler, y_scaler=y_scaler,
-                        tested_point=(api_n, efrf) if constraints_ok else None,
-                        title=f"{title} – API vs EFRF",
-                        y_axis='efrf',
-                        efrf_threshold=EFRF_MAX
-                    )
-                    if fig1 is not None:
-                        st.plotly_chart(fig1, use_container_width=True)
-                        st.caption("Green points satisfy all normal constraints (violation = 0).")
-
-                    # Plot 2: API vs Violation
-                    fig2 = plot_pareto_front(
-                        objectives, fronts, pop,
-                        balanced_solution=balanced_solution,
-                        quality_solution=quality_solution,
-                        cost_solution=cost_solution,
-                        model=model, scaler=scaler, y_scaler=y_scaler,
-                        tested_point=None,
-                        title=f"{title} – API vs Violation",
-                        y_axis='violation'
-                    )
-                    if fig2 is not None:
-                        st.plotly_chart(fig2, use_container_width=True)
-                        st.caption("Lower violation is better; zero violation means all constraints are satisfied.")
+                    if st.session_state.view_3d:
+                        # 3D Plot
+                        fig3d = plot_3d_front(
+                            objectives, fronts, pop,
+                            balanced_solution=balanced_solution,
+                            quality_solution=quality_solution,
+                            cost_solution=cost_solution,
+                            model=model, scaler=scaler, y_scaler=y_scaler,
+                            tested_point=(api_n, efrf, disintegration) if constraints_ok else None,
+                            title=f"{title} – 3D View"
+                        )
+                        if fig3d is not None:
+                            st.plotly_chart(fig3d, use_container_width=True)
+                    else:
+                        # 2D Plots side by side
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            fig1 = plot_2d_front(
+                                objectives, fronts, pop,
+                                balanced_solution=balanced_solution,
+                                quality_solution=quality_solution,
+                                cost_solution=cost_solution,
+                                model=model, scaler=scaler, y_scaler=y_scaler,
+                                tested_point=(api_n, efrf, disintegration) if constraints_ok else None,
+                                title=f"{title} – API vs EFRF",
+                                y_axis='efrf',
+                                efrf_threshold=EFRF_MAX
+                            )
+                            if fig1 is not None:
+                                st.plotly_chart(fig1, use_container_width=True)
+                        with col2:
+                            fig2 = plot_2d_front(
+                                objectives, fronts, pop,
+                                balanced_solution=balanced_solution,
+                                quality_solution=quality_solution,
+                                cost_solution=cost_solution,
+                                model=model, scaler=scaler, y_scaler=y_scaler,
+                                tested_point=(api_n, efrf, disintegration) if constraints_ok else None,
+                                title=f"{title} – API vs Disintegration",
+                                y_axis='disintegration'
+                            )
+                            if fig2 is not None:
+                                st.plotly_chart(fig2, use_container_width=True)
 
                 # ---- Show Solutions Table ----
                 st.markdown("### 📊 Optimal Solutions Comparison")
