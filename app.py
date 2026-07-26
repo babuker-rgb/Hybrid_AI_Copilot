@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – 3D PARETO FRONT (API vs EFRF vs DISINTEGRATION)
+# FINAL – 3D FIX (valid marker symbols)
 # ================================================================
 
 import streamlit as st
@@ -796,7 +796,8 @@ def plot_3d_front(objectives, fronts, pop, balanced_solution=None, quality_solut
                 hovertemplate=f'{label}<br>API: {api:.1f}%<br>EFRF: {ef:.4f}<br>Disintegration: {dis:.2f} min<extra></extra>'
             ))
 
-    add_solution_3d(balanced_solution, '⚖️ Balanced', 'gold', 'star')
+    # Balanced: use 'circle' (valid in 3D)
+    add_solution_3d(balanced_solution, '⚖️ Balanced', 'gold', 'circle')
     add_solution_3d(quality_solution, '🏆 Quality', 'green', 'diamond')
     add_solution_3d(cost_solution, '💰 Cost', 'orange', 'square')
 
@@ -1114,7 +1115,6 @@ def main():
                     st.success(f"✅ Pareto front: {len(fronts[0])} solutions")
 
                     if st.session_state.view_3d:
-                        # 3D Plot
                         fig3d = plot_3d_front(
                             objectives, fronts, pop,
                             balanced_solution=balanced_solution,
@@ -1127,7 +1127,6 @@ def main():
                         if fig3d is not None:
                             st.plotly_chart(fig3d, use_container_width=True)
                     else:
-                        # 2D Plots side by side
                         col1, col2 = st.columns(2)
                         with col1:
                             fig1 = plot_2d_front(
