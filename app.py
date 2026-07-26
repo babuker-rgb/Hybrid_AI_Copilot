@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – FIXED PARETO PLOT (USES SLIDER EFRF THRESHOLD)
+# FINAL – SOFT CONSTRAINTS AS OBJECTIVE (SPREAD FRONT)
 # ================================================================
 
 import streamlit as st
@@ -24,13 +24,12 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Hybrid AI · Tablet Optimization v29.28‑R32", layout="wide")
 
 # ================================================================
-# CONSTANTS (defaults)
+# CONSTANTS (normal ranges)
 # ================================================================
-DEFAULT_D_MIN = 0.72
-DEFAULT_D_MAX = 0.99
-DEFAULT_TENSILE_MIN = 1.50
-DEFAULT_EFRF_MAX = 0.40
-DEFAULT_DISINTEGRATION_MAX = 15.0
+D_MIN, D_MAX = 0.72, 0.99
+TENSILE_MIN = 1.50
+EFRF_MAX = 0.40
+DISINTEGRATION_MAX = 15.0
 
 SLIDER_API_MIN, SLIDER_API_MAX = 80.0, 98.0
 SLIDER_MCC_MIN, SLIDER_MCC_MAX = 1.5, 8.0
@@ -57,8 +56,6 @@ BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 BASE_POP = 80
 BASE_GENS = 60
 HIDDEN_SIZE = 512
-MIN_PRESSURE_DIFF = 5.0
-MIN_API_DIFF = 3.0
 
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
@@ -84,15 +81,10 @@ if 'api' not in st.session_state:
         'explore_min_api': 80.0,
         'explore_max_api': 98.0,
         'explore_steps': 5,
-        'd_min': DEFAULT_D_MIN,
-        'd_max': DEFAULT_D_MAX,
-        'tensile_min': DEFAULT_TENSILE_MIN,
-        'efrf_max': DEFAULT_EFRF_MAX,
-        'disintegration_max': DEFAULT_DISINTEGRATION_MAX,
     })
 
 # ================================================================
-# HELPERS
+# HELPERS (unchanged)
 # ================================================================
 def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
     comps = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
@@ -135,7 +127,7 @@ def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_tim
     return tau, beta
 
 # ================================================================
-# PINN MODEL
+# PINN MODEL (unchanged)
 # ================================================================
 class Mish(nn.Module):
     def forward(self, x):
@@ -186,7 +178,7 @@ class MultiTaskPINN(nn.Module):
             return self.forward(X_scaled).cpu().numpy()
 
 # ================================================================
-# DATA GENERATION (with relaxed bounds for fallback)
+# DATA GENERATION (unchanged)
 # ================================================================
 def generate_pinn_data(n_samples, random_state=42):
     rng = np.random.default_rng(random_state)
@@ -288,7 +280,7 @@ def generate_pinn_data(n_samples, random_state=42):
     return df, feature_names
 
 # ================================================================
-# MODEL LOADER (with fallback)
+# MODEL LOADER (unchanged)
 # ================================================================
 @st.cache_resource
 def get_model():
@@ -361,13 +353,12 @@ def get_model():
     return model, scaler, y_scaler, features, df
 
 # ================================================================
-# NSGA-II OPTIMIZER (with dynamic constraints)
+# NSGA-II OPTIMIZER – 6 OBJECTIVES (soft constraints)
 # ================================================================
 class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=80, gens=60,
                  granule_fixed=True, granule_fixed_val=125.0, api_objective='Minimize (Cost)',
-                 max_api=98.0, d_min=0.72, d_max=0.99, tensile_min=1.5,
-                 efrf_max=0.4, disintegration_max=15.0):
+                 max_api=98.0):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -378,11 +369,6 @@ class NSGAIIOptimizer:
         self.granule_fixed_val = granule_fixed_val
         self.api_objective = api_objective
         self.max_api = max_api
-        self.d_min = d_min
-        self.d_max = d_max
-        self.tensile_min = tensile_min
-        self.efrf_max = efrf_max
-        self.disintegration_max = disintegration_max
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -458,14 +444,16 @@ class NSGAIIOptimizer:
         pressure = repaired[:, 5]
         api = repaired[:, 0]
 
+        # ---- Constraint violation (soft) ----
         violation = np.zeros(n)
-        violation += np.maximum(0, self.d_min - density) + np.maximum(0, density - self.d_max)
-        violation += np.maximum(0, self.tensile_min - tensile)
-        violation += np.maximum(0, efrf - self.efrf_max)
-        violation += np.maximum(0, disintegration - self.disintegration_max)
+        violation += np.maximum(0, D_MIN - density) + np.maximum(0, density - D_MAX)
+        violation += np.maximum(0, TENSILE_MIN - tensile)
+        violation += np.maximum(0, efrf - EFRF_MAX)
+        violation += np.maximum(0, disintegration - DISINTEGRATION_MAX)
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
+        # ---- Objectives (6 objectives) ----
         if self.api_objective == 'Maximize (Quality)':
             api_obj = -api
         else:
@@ -476,10 +464,12 @@ class NSGAIIOptimizer:
             -tensile,
             efrf,
             pressure,
-            api_obj
+            api_obj,
+            violation          # minimise violation
         ])
         return objectives, repaired, violation
 
+    # ---- Standard NSGA-II methods (unchanged) ----
     def _non_dominated_sort(self, objectives, violations):
         n = objectives.shape[0]
         fronts = []
@@ -491,6 +481,7 @@ class NSGAIIOptimizer:
                 for j in remaining:
                     if i == j:
                         continue
+                    # Use violations for constraint dominance: if j has lower violation, it dominates.
                     if (violations[j] < violations[i]) or \
                        (violations[j] == 0 and violations[i] == 0 and
                         np.all(objectives[j] <= objectives[i]) and
@@ -663,35 +654,50 @@ def predict_pinn(model, scaler, y_scaler, inputs):
 
 def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_solution=None, cost_solution=None,
                       model=None, scaler=None, y_scaler=None, tested_point=None,
-                      title="Pareto Front", efrf_threshold=0.40):
-    """
-    Plot Pareto front with user-defined EFRF threshold.
-    """
+                      title="Pareto Front", efrf_threshold=0.40, show_violation=False):
     if fronts is None or len(fronts) == 0 or len(fronts[0]) == 0:
         return None
     front = fronts[0]
     try:
         api_vals = pop[front, 0]
         efrf_vals = objectives[front, 2]
+        viol_vals = objectives[front, 5]  # violation objective
     except Exception:
         return None
 
+    # Sort by API for line
     sorted_idx = np.argsort(api_vals)
     api_vals = api_vals[sorted_idx]
     efrf_vals = efrf_vals[sorted_idx]
+    viol_vals = viol_vals[sorted_idx]
 
     fig = go.Figure()
 
+    # Color by violation: green if feasible (viol=0), else red
+    colors = ['green' if v < 1e-6 else 'red' for v in viol_vals]
     fig.add_trace(go.Scatter(
         x=api_vals,
         y=efrf_vals,
-        mode='lines+markers',
-        name='Pareto Front',
-        line=dict(color='red', width=2),
-        marker=dict(size=7, color='red'),
-        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+        mode='markers',
+        name='Pareto Front (color: violation)',
+        marker=dict(size=8, color=colors, line=dict(width=1, color='black')),
+        hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<br>Violation: %{customdata:.4f}<extra></extra>',
+        customdata=viol_vals
     ))
+    # Also add a line connecting feasible points if any
+    feasible_mask = viol_vals < 1e-6
+    if np.any(feasible_mask):
+        fig.add_trace(go.Scatter(
+            x=api_vals[feasible_mask],
+            y=efrf_vals[feasible_mask],
+            mode='lines+markers',
+            name='Feasible Pareto Front (viol=0)',
+            line=dict(color='green', width=2),
+            marker=dict(size=8, color='green'),
+            hovertemplate='API: %{x:.1f}%<br>EFRF: %{y:.4f}<extra></extra>'
+        ))
 
+    # Selected solutions
     def add_solution(solution, label, color, symbol):
         if solution is not None:
             api = solution[0]
@@ -719,7 +725,6 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
             hovertemplate='Tested: API %{x:.1f}%, EFRF %{y:.4f}<extra></extra>'
         ))
 
-    # Use the threshold passed in (from slider)
     fig.add_hline(y=efrf_threshold, line_dash='dash', line_color='gray',
                   annotation_text=f'EFRF threshold ({efrf_threshold:.2f})')
     fig.add_vline(x=SLIDER_API_MIN, line_dash='dot', line_color='gray',
@@ -737,7 +742,6 @@ def plot_pareto_front(objectives, fronts, pop, balanced_solution=None, quality_s
     return fig
 
 def combine_pareto_fronts(all_results):
-    """Combine Pareto fronts from multiple runs."""
     combined_pop = []
     combined_objectives = []
     for pop, objectives, fronts, _ in all_results:
@@ -814,10 +818,6 @@ def main():
             key="api_objective_radio"
         )
         st.session_state.api_objective = api_obj
-        if api_obj == "Minimize (Cost)":
-            st.info("💡 API minimised – front will span from low to high API (if constraints allow).")
-        else:
-            st.warning("⚠️ API maximised – front may cluster at high API. Use 'Minimize' for spread.")
 
         st.markdown("### ⚙️ Max API for Optimisation")
         max_api = st.slider(
@@ -829,37 +829,23 @@ def main():
             key="max_api_slider"
         )
         st.session_state.max_api = max_api
-        st.caption(f"API will be capped at {max_api:.1f}% during optimisation.")
+        st.caption(f"API capped at {max_api:.1f}%.")
 
         st.markdown("### ⚙️ Auto‑Explore API Range")
-        auto_explore = st.checkbox("Auto‑explore API range (multiple runs)", value=st.session_state.get('auto_explore', False))
+        auto_explore = st.checkbox("Auto‑explore (multiple runs)", value=st.session_state.get('auto_explore', False))
         st.session_state.auto_explore = auto_explore
         if auto_explore:
             explore_min = st.slider("Min API", 80.0, 95.0, st.session_state.get('explore_min_api', 80.0), 0.5)
             explore_max = st.slider("Max API", 85.0, 98.0, st.session_state.get('explore_max_api', 98.0), 0.5)
-            explore_steps = st.slider("Number of steps", 2, 10, st.session_state.get('explore_steps', 5), 1)
+            explore_steps = st.slider("Steps", 2, 10, st.session_state.get('explore_steps', 5), 1)
             st.session_state.explore_min_api = explore_min
             st.session_state.explore_max_api = explore_max
             st.session_state.explore_steps = explore_steps
-            st.caption(f"Will run {explore_steps} optimisations with different API caps.")
+            st.caption(f"Running {explore_steps} optimisations with different API caps.")
 
-        st.markdown("### ⚙️ Constraint Settings (Relax for Spread)")
-        d_min = st.slider("Min Density", 0.50, 0.90, st.session_state.d_min, 0.01, key="d_min_slider")
-        d_max = st.slider("Max Density", 0.80, 0.99, st.session_state.d_max, 0.01, key="d_max_slider")
-        tensile_min = st.slider("Min Tensile (MPa)", 0.20, 3.00, st.session_state.tensile_min, 0.05, key="tensile_min_slider")
-        efrf_max = st.slider("Max EFRF", 0.20, 0.80, st.session_state.efrf_max, 0.01, key="efrf_max_slider")
-        disintegration_max = st.slider("Max Disintegration (min)", 5.0, 30.0, st.session_state.disintegration_max, 0.5, key="disintegration_max_slider")
-        st.session_state.d_min = d_min
-        st.session_state.d_max = d_max
-        st.session_state.tensile_min = tensile_min
-        st.session_state.efrf_max = efrf_max
-        st.session_state.disintegration_max = disintegration_max
-
-        st.markdown("### ⚙️ Balanced Score Weights")
-        with st.container(border=True):
-            st.slider("API Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_api")
-            st.slider("Tensile Weight", 0.0, 0.2, 0.05, 0.005, key="penalty_tensile")
-            st.slider("EFRF Weight", 0.0, 0.2, 0.08, 0.005, key="penalty_efrf")
+        st.markdown("### ⚙️ Normal Constraints (hard limits)")
+        st.info("Density: 0.72–0.99 | Tensile ≥ 1.5 | EFRF < 0.4 | Disintegration ≤ 15 | MCC 2–8%")
+        st.caption("Violation is minimised as an objective; green points on the front are feasible.")
 
         predict_btn = st.button("🚀 Predict & Optimize", use_container_width=True, type="primary")
 
@@ -883,20 +869,20 @@ def main():
 
                 st.markdown("**Constraint Status**")
                 col_metrics = st.columns(5)
-                col_metrics[0].metric("Density", f"{density:.3f}", f"[{d_min:.2f}, {d_max:.2f}]")
-                col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ {tensile_min:.2f}")
-                col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< {efrf_max:.2f}")
+                col_metrics[0].metric("Density", f"{density:.3f}", f"[0.72, 0.99]")
+                col_metrics[1].metric("Tensile", f"{tensile:.2f} MPa", f"≥ 1.50")
+                col_metrics[2].metric("EFRF", f"{efrf:.4f}", f"< 0.40")
                 col_metrics[3].metric("MCC", f"{mcc_n:.1f}%", f"≤ 8.0%")
-                col_metrics[4].metric("Disintegration", f"{disintegration:.1f} min", f"≤ {disintegration_max:.1f}")
+                col_metrics[4].metric("Disintegration", f"{disintegration:.1f} min", f"≤ 15")
 
-                constraints_ok = (d_min <= density <= d_max and tensile >= tensile_min and
-                                   efrf < efrf_max and mcc_n <= 8.0 and disintegration <= disintegration_max)
+                constraints_ok = (D_MIN <= density <= D_MAX and tensile >= TENSILE_MIN and
+                                   efrf < EFRF_MAX and mcc_n <= 8.0 and disintegration <= DISINTEGRATION_MAX)
                 if constraints_ok:
-                    st.success("✅ All constraints satisfied (using relaxed bounds)")
+                    st.success("✅ All constraints satisfied")
                 else:
                     st.error("❌ Constraints violated")
 
-                # ---- NSGA-II (single or auto-explore) ----
+                # ---- NSGA-II ----
                 bounds = np.array([
                     [SLIDER_API_MIN, SLIDER_API_MAX],
                     [BOUND_MCC_MIN, BOUND_MCC_MAX],
@@ -929,10 +915,7 @@ def main():
                                 granule_fixed=granule_fixed,
                                 granule_fixed_val=granule_use,
                                 api_objective=api_obj,
-                                max_api=cap,
-                                d_min=d_min, d_max=d_max,
-                                tensile_min=tensile_min, efrf_max=efrf_max,
-                                disintegration_max=disintegration_max
+                                max_api=cap
                             )
                             pop, objectives, fronts, violations = nsga.run()
                             all_results.append((pop, objectives, fronts, violations))
@@ -948,17 +931,14 @@ def main():
                         st.error("No results from auto-explore.")
                         return
                 else:
-                    with st.spinner(f"Running NSGA‑II (pop={BASE_POP}, gens={BASE_GENS}, API cap={max_api:.1f}%) ..."):
+                    with st.spinner(f"Running NSGA‑II (pop={BASE_POP}, gens={BASE_GENS}) ..."):
                         nsga = NSGAIIOptimizer(
                             model, scaler, y_scaler, bounds,
                             pop=BASE_POP, gens=BASE_GENS,
                             granule_fixed=granule_fixed,
                             granule_fixed_val=granule_use,
                             api_objective=api_obj,
-                            max_api=max_api,
-                            d_min=d_min, d_max=d_max,
-                            tensile_min=tensile_min, efrf_max=efrf_max,
-                            disintegration_max=disintegration_max
+                            max_api=max_api
                         )
                         pop, objectives, fronts, violations = nsga.run()
 
@@ -966,7 +946,7 @@ def main():
                 st.session_state.nsga_objectives = objectives
                 st.session_state.nsga_fronts = fronts
 
-                # ---- Extract 3 distinct solutions ----
+                # ---- Extract 3 distinct solutions (using violation=0 as filter) ----
                 balanced_solution = None
                 quality_solution = None
                 cost_solution = None
@@ -979,6 +959,7 @@ def main():
                         d, t, e, ef, dis, _, _ = predict_pinn(model, scaler, y_scaler, ind)
                         p = ind[5]
                         api_val = ind[0]
+                        viol = objectives[idx, 5]  # violation objective
                         candidates.append({
                             'idx': idx,
                             'ind': ind,
@@ -988,60 +969,57 @@ def main():
                             'pressure': p,
                             'api': api_val,
                             'disintegration': dis,
+                            'violation': viol,
                             'score': d - 20*ef - 0.01*p + 0.05*api_val
                         })
 
-                    candidates_sorted_bal = sorted(candidates, key=lambda x: x['score'], reverse=True)
-                    balanced = candidates_sorted_bal[0]
-                    balanced_solution = balanced['ind']
-                    balanced_idx = balanced['idx']
-                    pressure_bal = balanced['pressure']
-                    api_bal = balanced['api']
+                    # Filter feasible (violation == 0) for selection of balanced, quality, cost
+                    feasible_candidates = [c for c in candidates if c['violation'] < 1e-6]
 
-                    candidates_sorted_qual = sorted(candidates, key=lambda x: x['tensile'], reverse=True)
-                    quality = None
-                    for c in candidates_sorted_qual:
-                        if c['idx'] != balanced_idx:
-                            quality = c
-                            break
-                    if quality is None:
-                        candidates_dist = sorted(candidates, 
-                                                 key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal),
-                                                 reverse=True)
-                        for c in candidates_dist:
+                    if feasible_candidates:
+                        # Balanced: best score among feasible
+                        candidates_sorted_bal = sorted(feasible_candidates, key=lambda x: x['score'], reverse=True)
+                        balanced = candidates_sorted_bal[0]
+                        balanced_solution = balanced['ind']
+                        balanced_idx = balanced['idx']
+
+                        # Quality: highest tensile among feasible, different from balanced
+                        candidates_sorted_qual = sorted(feasible_candidates, key=lambda x: x['tensile'], reverse=True)
+                        quality = None
+                        for c in candidates_sorted_qual:
                             if c['idx'] != balanced_idx:
                                 quality = c
                                 break
-                    if quality is None:
-                        quality = candidates_sorted_bal[1] if len(candidates_sorted_bal) > 1 else balanced
-                    quality_solution = quality['ind']
-                    quality_idx = quality['idx']
-                    pressure_qual = quality['pressure']
-                    api_qual = quality['api']
+                        if quality is None:
+                            quality = candidates_sorted_bal[1] if len(candidates_sorted_bal) > 1 else balanced
+                        quality_solution = quality['ind']
+                        quality_idx = quality['idx']
 
-                    candidates_sorted_cost = sorted(candidates, key=lambda x: x['pressure'])
-                    cost = None
-                    for c in candidates_sorted_cost:
-                        if c['idx'] != balanced_idx and c['idx'] != quality_idx:
-                            cost = c
-                            break
-                    if cost is None:
-                        candidates_dist2 = sorted(candidates,
-                                                  key=lambda c: abs(c['pressure'] - pressure_bal) + abs(c['api'] - api_bal) +
-                                                                 abs(c['pressure'] - pressure_qual) + abs(c['api'] - api_qual),
-                                                  reverse=True)
-                        for c in candidates_dist2:
+                        # Cost: lowest pressure among feasible, different from both
+                        candidates_sorted_cost = sorted(feasible_candidates, key=lambda x: x['pressure'])
+                        cost = None
+                        for c in candidates_sorted_cost:
                             if c['idx'] != balanced_idx and c['idx'] != quality_idx:
                                 cost = c
                                 break
-                    if cost is None:
-                        for c in candidates_sorted_bal:
-                            if c['idx'] != balanced_idx and c['idx'] != quality_idx:
-                                cost = c
-                                break
-                    if cost is None:
-                        cost = candidates_sorted_bal[2] if len(candidates_sorted_bal) > 2 else balanced
-                    cost_solution = cost['ind']
+                        if cost is None:
+                            cost = candidates_sorted_bal[2] if len(candidates_sorted_bal) > 2 else balanced
+                        cost_solution = cost['ind']
+                    else:
+                        # No feasible solutions – pick from all with lowest violation
+                        st.warning("No fully feasible solutions found; showing least-violating.")
+                        candidates_sorted_viol = sorted(candidates, key=lambda x: x['violation'])
+                        best_viol = candidates_sorted_viol[0]
+                        balanced_solution = best_viol['ind']
+                        # fallback: quality = second, cost = third if available
+                        if len(candidates_sorted_viol) > 1:
+                            quality_solution = candidates_sorted_viol[1]['ind']
+                        else:
+                            quality_solution = best_viol['ind']
+                        if len(candidates_sorted_viol) > 2:
+                            cost_solution = candidates_sorted_viol[2]['ind']
+                        else:
+                            cost_solution = best_viol['ind']
 
                     st.session_state.balanced_solution = balanced_solution
                     st.session_state.quality_solution = quality_solution
@@ -1061,7 +1039,7 @@ def main():
                 st.markdown("### 📉 Pareto Front – API vs EFRF")
                 if fronts is not None and len(fronts[0]) > 0:
                     title = "Combined Pareto Front (Auto‑Explore)" if st.session_state.auto_explore else "Pareto Front"
-                    st.success(f"✅ Pareto front: {len(fronts[0])} optimal solutions")
+                    st.success(f"✅ Pareto front: {len(fronts[0])} solutions")
                     fig = plot_pareto_front(
                         objectives, fronts, pop,
                         balanced_solution=balanced_solution,
@@ -1070,10 +1048,11 @@ def main():
                         model=model, scaler=scaler, y_scaler=y_scaler,
                         tested_point=(api_n, efrf) if constraints_ok else None,
                         title=title,
-                        efrf_threshold=efrf_max   # pass the slider value
+                        efrf_threshold=EFRF_MAX
                     )
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
+                    st.caption("Green points satisfy all normal constraints (violation = 0).")
 
                 # ---- Show Solutions Table ----
                 st.markdown("### 📊 Optimal Solutions Comparison")
