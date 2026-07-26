@@ -1,7 +1,7 @@
 # ================================================================
 # Hybrid AI · Multi-Objective Tablet Optimization
 # Nile Valley University · Sudan · v29.28‑R32
-# FINAL – SPREAD FRONT WITH RELAX TOGGLE + INCREASED DIVERSITY
+# FINAL – DIVERSE API SPREAD + RELAX TOGGLE
 # ================================================================
 
 import streamlit as st
@@ -53,10 +53,15 @@ BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
 BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
 BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
 
-# Increased pop/gens for diversity
+# Enhanced NSGA‑II parameters (increased pop/gens)
 NSGA_POP = 100
 NSGA_GENS = 60
 HIDDEN_SIZE = 512
+
+# Penalty weights for objectives
+PENALTY_API = 0.05
+PENALTY_TENSILE = 0.04
+PENALTY_EFRF = 0.06
 
 FALLBACK_SAMPLES = 15000
 FALLBACK_EPOCHS = 200
@@ -361,7 +366,8 @@ class NSGAIIOptimizer:
     def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
                  granule_fixed=True, granule_fixed_val=125.0,
                  api_objective='Minimize (Cost)', max_api=98.0,
-                 relax=False):
+                 relax=False,
+                 penalty_api=PENALTY_API, penalty_tensile=PENALTY_TENSILE, penalty_efrf=PENALTY_EFRF):
         self.model = model
         self.scaler = scaler
         self.y_scaler = y_scaler
@@ -373,6 +379,9 @@ class NSGAIIOptimizer:
         self.api_objective = api_objective
         self.max_api = max_api
         self.relax = relax
+        self.penalty_api = penalty_api
+        self.penalty_tensile = penalty_tensile
+        self.penalty_efrf = penalty_efrf
 
     def _repair(self, ind):
         api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
@@ -451,7 +460,6 @@ class NSGAIIOptimizer:
         # ---- Constraint violation (soft) ----
         violation = np.zeros(n)
         if self.relax:
-            # Relaxed constraints: lower density/tensile, higher EFRF
             d_min = 0.50
             d_max = 0.99
             tensile_min = 0.20
@@ -471,16 +479,47 @@ class NSGAIIOptimizer:
         mcc_val = repaired[:, 1]
         violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
 
-        # ---- Objectives (6 objectives) ----
+        # ---- Objectives (6 objectives) + soft penalties ----
         if self.api_objective == 'Maximize (Quality)':
             api_obj = -api
         else:
             api_obj = api
 
+        # Add penalties for low API, low tensile, high EFRF (as extra objective contributions)
+        # These are added to the corresponding objectives (density, tensile, efrf) to push
+        # solutions away from extreme values.
+        # However, to keep the Pareto front diverse, we add them as separate penalty terms
+        # that are summed into the violation or as additional objectives.
+        # Here we incorporate them into the violation to softly discourage.
+        # Alternatively, we could add them as separate objectives.
+        # For simplicity, we add them to the violation (so they become part of the constraint handling).
+        # But to match the user's snippet, we can add them to the objective values directly.
+        # Let's add them to the first three objectives (density, tensile, efrf) as small adjustments.
+        # Actually, the snippet uses penalty_api, penalty_tensile, penalty_efrf as weights
+        # added to the objectives. We'll do that by modifying the objectives array.
+        # We'll subtract penalties for low API (since we want to maximize API, we penalize low API)
+        # and for low tensile, and add penalty for high efrf.
+        # We'll apply these penalties to the objectives that are being minimized.
+        # For density objective (minimize -density), we want to penalize low density, which is already
+        # covered by violation. For tensile, we penalize low tensile (since we minimize -tensile).
+        # For efrf, we penalize high efrf.
+        # We'll add these as soft penalties to the objectives themselves.
+
+        # Compute normalized penalties
+        api_norm = (api - SLIDER_API_MIN) / (SLIDER_API_MAX - SLIDER_API_MIN)
+        tensile_norm = tensile / 8.5  # rough max tensile
+        efrf_norm = efrf / EFRF_MAX   # normalized to threshold
+
+        penalty_api_vec = self.penalty_api * (1 - api_norm) * 0.1  # small effect
+        penalty_tensile_vec = self.penalty_tensile * (1 - tensile_norm) * 0.1
+        penalty_efrf_vec = self.penalty_efrf * efrf_norm * 0.1
+
+        # Apply penalties to the corresponding objectives (which are being minimized)
+        # density objective: -density, so we add penalty to increase it (make it worse)
         objectives = np.column_stack([
-            -density,
-            -tensile,
-            efrf,
+            -density + penalty_api_vec,        # penalty for low API
+            -tensile + penalty_tensile_vec,    # penalty for low tensile
+            efrf + penalty_efrf_vec,           # penalty for high EFRF
             pressure,
             api_obj,
             violation
@@ -570,9 +609,8 @@ class NSGAIIOptimizer:
         rng = np.random.default_rng()
         pop = []
         for _ in range(self.pop_size):
-            # Expanded initialization with noise
+            # Expanded API range with noise for diversity
             api = rng.uniform(SLIDER_API_MIN, self.max_api)
-            # Add small noise for diversity
             api += rng.normal(0, 0.3)
             api = np.clip(api, SLIDER_API_MIN, self.max_api)
             mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
@@ -588,6 +626,9 @@ class NSGAIIOptimizer:
             dwell_time = calculate_dwell_time(speed)
             friction = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
             decompression_time = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
+            # Add small noise to other variables as well (optional)
+            binder += rng.normal(0, 0.1)
+            pvpp += rng.normal(0, 0.1)
             ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
                             particle_size, moisture, binder_grade, dwell_time, friction, decompression_time])
             pop.append(self._repair(ind))
