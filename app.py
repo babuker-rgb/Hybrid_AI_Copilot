@@ -1,6 +1,6 @@
 # ================================================================
-# Hybrid AI v32.0-Ultimate · Unified Release
-# (NSGA-III Adaptive + PINN + Physics + 2D/3D/Radar)
+# Hybrid AI v32.1-Ultimate-Pro · Production-Ready
+# (Atomic Saves, Robust Error Handling, st.rerun, 2D/3D/Radar)
 # ================================================================
 
 import streamlit as st
@@ -24,7 +24,7 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIG
 # ================================================================
 st.set_page_config(
-    page_title="Hybrid AI v32.0-Ultimate", page_icon="🧬", layout="wide"
+    page_title="Hybrid AI v32.1-Pro", page_icon="🧬", layout="wide"
 )
 
 # ================================================================
@@ -161,9 +161,9 @@ def calculate_heckel_density(pressure, binder):
     return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
 
 # ================================================================
-# TRAINING LOOP (Stable Cache, Progress bar, Physics Loss)
+# ROBUST TRAINING LOOP (Atomic Save + Auto Delete Corrupted files)
 # ================================================================
-CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_v32_ultimate.pt')
+CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_v32_pro.pt')
 
 @st.cache_resource(show_spinner=False)
 def train_model():
@@ -174,7 +174,12 @@ def train_model():
             model.load_state_dict(ckpt['model_state'])
             model.eval()
             return model, ckpt['scaler']
-        except: pass
+        except Exception:
+            # If loading fails, delete the corrupted file to force retraining
+            try:
+                os.remove(CHECKPOINT_PATH)
+            except OSError:
+                pass
 
     X, y = generate_synthetic_data(n_samples=N_SAMPLES)
     scaler = InputScaler().fit(X)
@@ -209,11 +214,16 @@ def train_model():
             if patience >= EARLY_STOPPING_PATIENCE: break
             
     model.eval()
-    torch.save({'model_state': model.state_dict(), 'scaler': scaler}, CHECKPOINT_PATH)
+    
+    # ATOMIC SAVE: Write to temp then replace
+    tmp_path = CHECKPOINT_PATH + f'.tmp{os.getpid()}'
+    torch.save({'model_state': model.state_dict(), 'scaler': scaler}, tmp_path)
+    os.replace(tmp_path, CHECKPOINT_PATH)
+    
     return model, scaler
 
 # ================================================================
-# ADVANCED OPTIMIZER (NSGA-II + Adaptive Mutation)
+# ADVANCED OPTIMIZER
 # ================================================================
 class AdvancedOptimizer:
     def __init__(self, model, scaler, pop_size=POPULATION_SIZE, generations=NSGA_GENERATIONS):
@@ -357,23 +367,13 @@ def render_dynamic_radar(solutions_df, selected_solutions):
     fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, height=380)
     st.plotly_chart(fig, use_container_width=True)
 
-def target_status(value, threshold, mode='min', comfortable=None):
-    if mode == 'min':
-        if value < threshold: return "🔴 Below target"
-        if comfortable is not None and value >= comfortable: return "✅ Excellent"
-        return "✅ Passes (near limit)"
-    else:
-        if value > threshold: return "🔴 Exceeds limit"
-        if comfortable is not None and value <= comfortable: return "✅ Excellent"
-        return "⚠️ Passes (near limit)"
-
 # ================================================================
 # UI RENDER FUNCTIONS
 # ================================================================
 def render_sidebar():
     with st.sidebar:
         st.markdown("## 🧬 Hybrid AI Framework")
-        st.markdown("---"); st.markdown(f"**Version:** v32.0-Ultimate")
+        st.markdown("---"); st.markdown(f"**Version:** v32.1-Pro")
         st.markdown(f"**Institution:** Nile Valley University")
         st.markdown("---")
         st.sidebar.header("⚖️ Custom Recommender")
@@ -403,7 +403,7 @@ def render_input_panel():
 # MAIN APPLICATION
 # ================================================================
 def main():
-    st.title("🧬 Hybrid AI v32.0-Ultimate · Unified 2D/3D/Radar")
+    st.title("🧬 Hybrid AI v32.1-Pro · Production Ready")
     w_api, w_quality = render_sidebar()
     api, binder, pvpp, mgst, mcc, moisture, pressure, speed = render_input_panel()
 
@@ -426,6 +426,9 @@ def main():
                 opt_bar.progress((gen+1)/NSGA_GENERATIONS)
                 if gen % 10 == 0: status.update(label=f"Generation {gen+1}/{NSGA_GENERATIONS}")
             status.update(label="Optimization Complete ✅", state="complete")
+            
+            # Capture runtime for session state
+            st.session_state.runtime = round(time.time() - start_time, 1)
 
         # 3. Process Solutions & Golden Star
         weights = np.array([w_api, w_quality])
@@ -440,7 +443,7 @@ def main():
         preds, unc = model.predict_with_uncertainty(torch.tensor(pop_scaled, dtype=torch.float32))
         preds, unc = preds[0], unc[0]
         st.success(f"🏆 Golden Solution Found!\nAPI: {best_sol[0]:.2f}% | EFRF: {preds[2]:.3f} ± {unc[2]:.3f}")
-        st.caption(f"Optimization took {time.time() - start_time:.2f} seconds.")
+        st.caption(f"Optimization took {st.session_state.runtime:.2f} seconds.")
 
         # 4. Compute Tested Formulation Data
         slider_form = np.array([[api, binder, pvpp, mgst, mcc, moisture, pressure, speed]], dtype=np.float32)
@@ -460,7 +463,7 @@ def main():
                 'Quality Score': float(100 - (final_obj[idx].sum() * 20))
             })
         sol_df = pd.DataFrame(sol_list)
-        golden = {'API (%)': best_sol[0], 'EFRF': preds[2]} # Simplified golden dict for plots
+        golden = {'API (%)': best_sol[0], 'EFRF': preds[2]} 
 
         # 6. Render All Visualizations
         st.subheader("🌐 2D Pareto Front (API vs EFRF)")
@@ -488,7 +491,13 @@ def main():
             'golden_api': float(best_sol[0]), 'golden_efrf': float(preds[2]), 'golden_tensile': float(preds[1]),
             'top_solutions': sol_df.to_dict('records'), 'tested_formulation': tested_data
         }
-        st.download_button("📥 Download Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="ultimate_report.json")
+        st.download_button("📥 Download Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="pro_report.json")
+        
+        # =================================================================
+        # FIX: Use st.rerun() to immediately update the Sidebar Runtime
+        # =================================================================
+        st.balloons()
+        st.rerun()
 
 if __name__ == "__main__":
     main()
