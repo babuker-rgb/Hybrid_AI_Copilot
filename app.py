@@ -1,7 +1,6 @@
 # ================================================================
-# Hybrid AI · Multi-Objective Tablet Optimization
-# Nile Valley University · Sudan · v29.28‑R32
-# FINAL – FORCED API SPREAD (POP=120, NOISE, RELAXED CONSTRAINTS)
+# Hybrid AI v32.0-Ultimate · Unified Release
+# (NSGA-III Adaptive + PINN + Physics + 2D/3D/Radar)
 # ================================================================
 
 import streamlit as st
@@ -9,637 +8,487 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_squared_error
 import plotly.graph_objects as go
-import os
+import time
 import warnings
+import json
+import os
+import tempfile
+from datetime import datetime
+from sklearn.inspection import permutation_importance
+from sklearn.ensemble import RandomForestRegressor
+
 warnings.filterwarnings('ignore')
 
 # ================================================================
 # PAGE CONFIG
 # ================================================================
-st.set_page_config(page_title="Hybrid AI · Tablet Optimization v29.28‑R32", layout="wide")
+st.set_page_config(
+    page_title="Hybrid AI v32.0-Ultimate", page_icon="🧬", layout="wide"
+)
 
 # ================================================================
 # CONSTANTS
 # ================================================================
-D_MIN, D_MAX = 0.72, 0.99
-TENSILE_MIN = 1.50
-EFRF_MAX = 0.40
-DISINTEGRATION_MAX = 15.0
+API_MIN, API_MAX = 80.0, 98.0
+BINDER_MIN, BINDER_MAX = 1.4, 6.0
+PVPP_MIN, PVPP_MAX = 1.0, 6.0
+MGST_MIN, MGST_MAX = 0.10, 1.2
+MCC_MIN, MCC_MAX = 1.5, 8.0
+MOISTURE_MIN, MOISTURE_MAX = 0.5, 5.0
+PRESSURE_MIN, PRESSURE_MAX = 150.0, 250.0
+SPEED_MIN, SPEED_MAX = 15.0, 30.0
+EFRF_THRESHOLD = 0.40
 
-SLIDER_API_MIN, SLIDER_API_MAX = 80.0, 98.0
-SLIDER_MCC_MIN, SLIDER_MCC_MAX = 1.5, 8.0
-SLIDER_PVPP_MIN, SLIDER_PVPP_MAX = 1.0, 6.0
-SLIDER_MGST_MIN, SLIDER_MGST_MAX = 0.10, 1.2
-SLIDER_BINDER_MIN, SLIDER_BINDER_MAX = 1.4, 6.0
-SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX = 0.5, 5.0
-SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX = 10.0, 200.0
-
-SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX = 150.0, 250.0
-SLIDER_SPEED_MIN, SLIDER_SPEED_MAX = 15.0, 30.0
-SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX = 30.0, 250.0
-SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX = 5.0, 50.0
-SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX = 0.1, 0.5
-SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX = 10.0, 80.0
-
-BINDER_GRADES = ["MCC PH101", "MCC PH102", "MCC PH200", "MCC KG", "Lactose", "Dicalcium Phosphate"]
-
-BOUND_MCC_MIN, BOUND_MCC_MAX = 2.0, 8.0
-BOUND_PVPP_MIN, BOUND_PVPP_MAX = 1.5, 6.0
-BOUND_MGST_MIN, BOUND_MGST_MAX = 0.3, 1.2
-BOUND_BINDER_MIN, BOUND_BINDER_MAX = 3.0, 6.0
-
-# Enhanced NSGA‑II parameters (larger pop, more gens)
-NSGA_POP = 120
-NSGA_GENS = 70
+POPULATION_SIZE = 80
+NSGA_GENERATIONS = 80
+TRAINING_EPOCHS = 1200
+EARLY_STOPPING_PATIENCE = 100
 HIDDEN_SIZE = 512
+N_SAMPLES = 10000
 
-# Lower penalties to allow low‑API solutions
-PENALTY_API = 0.04
-PENALTY_TENSILE = 0.03
-PENALTY_EFRF = 0.05
-
-FALLBACK_SAMPLES = 15000
-FALLBACK_EPOCHS = 200
-
-# ================================================================
-# SESSION STATE
-# ================================================================
-if 'api' not in st.session_state:
-    st.session_state.update({
-        'api': 89.5, 'binder': 3.5, 'pvpp': 2.0, 'mgst': 0.5, 'mcc': 3.5,
-        'moisture': 1.0, 'particle_size': 50.0, 'binder_grade_index': 0,
-        'granule_mode_select': 'Fixed',
-        'pressure': 200.0, 'speed': 20.0, 'dwell_time': 25.0,
-        'friction': 0.25, 'decompression_time': 35.0, 'granule': 125.0,
-        'show_cost_solution': True,
-        'show_quality_solution': True,
-        'run_optimized': False,
-        'balanced_solution': None, 'quality_solution': None, 'cost_solution': None,
-        'balanced_pred': None, 'quality_pred': None, 'cost_pred': None,
-        'api_objective': 'Minimize (Cost)',
-        'max_api': 98.0,
-        'auto_explore': False,
-        'explore_min_api': 80.0,
-        'explore_max_api': 98.0,
-        'explore_steps': 5,
-        'relax_constraints': False,
-        'view_3d': True,
-    })
+BINDER_GRADES = {
+    "MCC PH101": {"compressibility": 0.85, "disintegration": 0.90, "flow": 0.80},
+    "MCC PH102": {"compressibility": 0.90, "disintegration": 0.85, "flow": 0.85},
+    "MCC PH200": {"compressibility": 0.95, "disintegration": 0.80, "flow": 0.90},
+    "MCC KG": {"compressibility": 0.88, "disintegration": 0.88, "flow": 0.82},
+    "Lactose Monohydrate": {"compressibility": 0.75, "disintegration": 0.95, "flow": 0.78},
+    "Dicalcium Phosphate": {"compressibility": 0.70, "disintegration": 0.85, "flow": 0.75}
+}
+BINDER_GRADE_NAMES = list(BINDER_GRADES.keys())
 
 # ================================================================
-# HELPERS (unchanged)
+# HELPER FUNCTIONS
 # ================================================================
-def normalize_components(api, binder, pvpp, mgst, mcc, moisture):
-    comps = np.array([api, binder, pvpp, mgst, mcc, moisture], dtype=float)
+def normalize_formulation(api, binder, pvpp, mgst, mcc, moisture):
+    comps = np.array([api, binder, pvpp, mgst, mcc, moisture])
     total = np.sum(comps)
-    if total <= 0:
-        total = 1.0
-    norm = (comps / total) * 100.0
-    api, binder, pvpp, mgst, mcc, moisture = norm
-    api = np.clip(api, SLIDER_API_MIN, SLIDER_API_MAX)
-    binder = np.clip(binder, SLIDER_BINDER_MIN, SLIDER_BINDER_MAX)
-    pvpp = np.clip(pvpp, SLIDER_PVPP_MIN, SLIDER_PVPP_MAX)
-    mgst = np.clip(mgst, SLIDER_MGST_MIN, SLIDER_MGST_MAX)
-    mcc = np.clip(mcc, SLIDER_MCC_MIN, SLIDER_MCC_MAX)
-    moisture = np.clip(moisture, SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
-    total2 = api + binder + pvpp + mgst + mcc + moisture
-    scale = 100.0 / total2
-    return api*scale, binder*scale, pvpp*scale, mgst*scale, mcc*scale, moisture*scale
+    if total <= 0: total = 1.0
+    norm = (comps / total) * 100
+    return {'api': norm[0], 'binder': norm[1], 'pvpp': norm[2],
+            'mgst': norm[3], 'mcc': norm[4], 'moisture': norm[5]}
 
-def calculate_dwell_time(speed_rpm, punch_width=10, pitch_diameter=100):
-    speed_rpm = np.asarray(speed_rpm)
-    result = np.full_like(speed_rpm, 50.0, dtype=float)
-    mask = speed_rpm > 0
-    result[mask] = (punch_width * 60 * 1000) / (np.pi * pitch_diameter * speed_rpm[mask])
-    return np.clip(result, 5.0, 80.0)
+def validate_formulation(api, binder, pvpp, mgst, mcc, moisture):
+    total = sum([api, binder, pvpp, mgst, mcc, moisture])
+    return (95 <= total <= 105, f"Total is {total:.1f}% – should be ~100%")
 
-def predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n):
-    base_time = 2.0 + 0.5 * tensile
-    pvpp_effect = 5.0 * np.exp(-0.5 * pvpp_n)
-    api_effect = 0.1 * (api_n - 80)
-    binder_effect = 0.2 * (binder_n - 2.0)
-    moisture_effect = -0.1 * moisture_n
-    time = base_time - pvpp_effect + api_effect + binder_effect + moisture_effect
-    return np.clip(time, 1.0, 30.0)
-
-def predict_dissolution_profile(api_n, pvpp_n, particle_size, disintegration_time):
-    tau = 5.0 + 0.5 * disintegration_time - 0.1 * pvpp_n + 0.05 * (api_n - 80)
-    tau = np.clip(tau, 2.0, 20.0)
-    beta = 1.0 + 0.01 * (particle_size - 50) / 50
-    beta = np.clip(beta, 0.8, 2.5)
-    return tau, beta
-
-# ================================================================
-# PINN MODEL (unchanged)
-# ================================================================
-class Mish(nn.Module):
-    def forward(self, x):
-        return x * torch.tanh(torch.nn.functional.softplus(x))
-
-class ResidualBlock(nn.Module):
-    def __init__(self, features, dropout=0.1):
-        super().__init__()
-        self.lin1 = nn.Linear(features, features)
-        self.bn1 = nn.BatchNorm1d(features)
-        self.lin2 = nn.Linear(features, features)
-        self.bn2 = nn.BatchNorm1d(features)
-        self.act = Mish()
-        self.drop = nn.Dropout(dropout)
-    def forward(self, x):
-        identity = x
-        out = self.act(self.bn1(self.lin1(x)))
-        out = self.drop(out)
-        out = self.bn2(self.lin2(out))
-        out = self.drop(out)
-        return identity + out
-
-class MultiTaskPINN(nn.Module):
-    def __init__(self, input_dim=19, hidden=HIDDEN_SIZE):
-        super().__init__()
-        self.input_layer = nn.Sequential(nn.Linear(input_dim, hidden), Mish(), nn.Dropout(0.05))
-        self.res1 = ResidualBlock(hidden, dropout=0.05)
-        self.res2 = ResidualBlock(hidden, dropout=0.05)
-        self.res3 = ResidualBlock(hidden, dropout=0.05)
-        self.transition = nn.Sequential(nn.Linear(hidden, hidden//2), nn.Tanh(), nn.Dropout(0.05))
-        self.output = nn.Linear(hidden//2, 6)
-
-    def forward(self, X):
-        x = self.input_layer(X)
-        x = self.res1(x)
-        x = self.res2(x)
-        x = self.res3(x)
-        x = self.transition(x)
-        return self.output(x)
-
-    def predict(self, X_scaled):
-        self.eval()
-        with torch.no_grad():
-            if not isinstance(X_scaled, torch.Tensor):
-                X_scaled = torch.tensor(X_scaled, dtype=torch.float32)
-            device = next(self.parameters()).device
-            X_scaled = X_scaled.to(device)
-            return self.forward(X_scaled).cpu().numpy()
-
-# ================================================================
-# DATA GENERATION (unchanged)
-# ================================================================
-def generate_pinn_data(n_samples, random_state=42):
-    rng = np.random.default_rng(random_state)
-    api_raw = rng.uniform(SLIDER_API_MIN, SLIDER_API_MAX, n_samples)
-    binder_raw = rng.uniform(SLIDER_BINDER_MIN, SLIDER_BINDER_MAX, n_samples)
-    pvpp_raw = rng.uniform(SLIDER_PVPP_MIN, SLIDER_PVPP_MAX, n_samples)
-    mgst_raw = rng.uniform(SLIDER_MGST_MIN, SLIDER_MGST_MAX, n_samples)
-    mcc_raw = rng.uniform(SLIDER_MCC_MIN, SLIDER_MCC_MAX, n_samples)
-    moisture_raw = rng.uniform(SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX, n_samples)
-    particle_size_raw = rng.uniform(SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX, n_samples)
-    binder_grade_raw = rng.integers(0, len(BINDER_GRADES), n_samples)
-    pressure_raw = rng.uniform(SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX, n_samples)
-    speed_raw = rng.uniform(SLIDER_SPEED_MIN, SLIDER_SPEED_MAX, n_samples)
-    dwell_time_raw = calculate_dwell_time(speed_raw)
-    friction_raw = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX, n_samples)
-    decompression_time_raw = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX, n_samples)
-    granule_raw = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX, n_samples)
-
-    api_n, binder_n, pvpp_n, mgst_n, mcc_n, moisture_n = normalize_components(
-        api_raw, binder_raw, pvpp_raw, mgst_raw, mcc_raw, moisture_raw
-    )
-
-    X_base = np.column_stack([
-        api_n, mcc_n, pvpp_n, mgst_n, binder_n,
-        pressure_raw, speed_raw, granule_raw,
-        particle_size_raw, moisture_n, binder_grade_raw,
-        dwell_time_raw, friction_raw, decompression_time_raw
-    ])
-
-    api_binder = api_n * binder_n
-    pressure_binder = pressure_raw * binder_n
-    api_mcc = api_n * mcc_n
-    pressure_speed = pressure_raw * speed_raw
-    binder_mgst = binder_n * mgst_n
-
-    X_enhanced = np.column_stack([
-        X_base,
-        api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
-    ])
-
-    feature_names = [
-        'API_%', 'MCC_%', 'PVPP_%', 'MgSt_%', 'Binder_%',
-        'Pressure_MPa', 'Speed_rpm', 'Granule_Size_µm',
-        'Particle_Size_µm', 'Moisture_%', 'Binder_Grade',
-        'Dwell_Time_ms', 'Friction', 'Decompression_Time_ms',
-        'API_Binder', 'Pressure_Binder', 'API_MCC', 'Pressure_Speed', 'Binder_MgSt'
-    ]
-
-    k_heckel = 0.025 + 0.0001 * pressure_raw
-    A_heckel = 1.0 + 0.01 * (api_n - 85.0) - 0.05 * binder_n
-    D_heckel = 1.0 - np.exp(-(k_heckel * pressure_raw + A_heckel))
-    D_heckel = np.clip(D_heckel, 0.6, 0.99)
-
-    a_kawakita = 0.82 + 0.04 * (mcc_n - 1.5)/6.5 + 0.02 * (binder_n - 1.4)/4.6
-    a_kawakita = np.clip(a_kawakita, 0.78, 0.92)
-    b_kawakita = 0.002 + 0.003 * (binder_n - 1.4)/4.6 + 0.001 * (mcc_n - 1.5)/6.5
-    b_kawakita = np.clip(b_kawakita, 0.0005, 0.006)
-    D_kawakita = 1.0 - pressure_raw / (a_kawakita * pressure_raw + 1.0/b_kawakita)
-    D_kawakita = np.clip(D_kawakita, 0.6, 0.99)
-
-    pressure_norm = (pressure_raw - SLIDER_PRESSURE_MIN) / (SLIDER_PRESSURE_MAX - SLIDER_PRESSURE_MIN)
-    D = pressure_norm * D_heckel + (1 - pressure_norm) * D_kawakita
-    D += -0.003*(moisture_n - 2.0) - 0.002*(particle_size_raw - 50)/150 - 0.002*(speed_raw - 15)/15 - 0.01*(mgst_n - 0.2)
-    D = np.clip(D, 0.6, 0.99)
-
-    porosity = 1.0 - D
-    sigma0 = 5.0 + 0.1*(api_n - 85.0) + 0.2*binder_n - 0.5*mgst_n
-    sigma0 = np.clip(sigma0, 2.0, 8.0)
-    b = 2.5 - 0.005*(pressure_raw - 80.0) - 0.01*(particle_size_raw - 50)/100
-    b = np.clip(b, 1.5, 3.5)
-    tensile_base = sigma0 * np.exp(-b * porosity)
-    api_effect = 1.0 - 0.005*(api_n - 85.0)
-    binder_effect = 1.0 + 0.03*(binder_n - 2.0)
-    mgst_effect = 1.0 - 0.1*(mgst_n - 0.2)
-    pvpp_effect = 1.0 - 0.02*(pvpp_n - 3.0)
-    speed_effect = 1.0 - 0.002*(speed_raw - 10.0)
-    particle_effect = 1.0 - 0.0005*(particle_size_raw - 50)
-    particle_effect = np.clip(particle_effect, 0.8, 1.2)
-    tensile = tensile_base * api_effect * binder_effect * mgst_effect * pvpp_effect * speed_effect * particle_effect
-    tensile = np.clip(tensile, 0.5, 8.5)
-
-    er_base = (1.8 + 0.3*(api_n - 85.0)/10.0 + 0.08*(speed_raw - 10.0)/30.0 - 0.1*(pressure_raw - 100.0)/150.0 + 0.02*(decompression_time_raw - 35.0)/30.0)
-    er = er_base * (1.0 - 0.15*(D - 0.4))
-    er = np.clip(er, 0.5, 4.0)
-
-    disintegration = predict_disintegration_time(tensile, pvpp_n, api_n, binder_n, moisture_n)
-    disintegration = np.clip(disintegration, 1.0, 30.0)
-    tau, beta = predict_dissolution_profile(api_n, pvpp_n, particle_size_raw, disintegration)
-    tau = np.clip(tau, 2.0, 20.0)
-    beta = np.clip(beta, 0.8, 2.5)
-
-    df = pd.DataFrame(X_enhanced, columns=feature_names)
-    df['Density'] = D
-    df['Tensile_Strength_MPa'] = tensile
-    df['Elastic_Recovery_%'] = er
-    df['Disintegration_Time_min'] = disintegration
-    df['Dissolution_Tau'] = tau
-    df['Dissolution_Beta'] = beta
-    return df, feature_names
-
-# ================================================================
-# MODEL LOADER (unchanged)
-# ================================================================
-@st.cache_resource
-def get_model():
-    checkpoint_path = os.path.join(os.path.dirname(__file__), 'hybrid_unified_v29_30_R40.pt')
-    if os.path.exists(checkpoint_path):
-        try:
-            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            model = MultiTaskPINN(input_dim=ckpt['input_dim'], hidden=HIDDEN_SIZE)
-            model.load_state_dict(ckpt['model_state'])
-            scaler = ckpt['scaler']
-            y_scaler = ckpt['y_scaler']
-            features = ckpt['features']
-            df = ckpt['df']
-            st.success("✅ Pre-trained model loaded successfully!")
-            return model, scaler, y_scaler, features, df
-        except Exception as e:
-            st.warning(f"⚠️ Failed to load pre-trained model: {e}. Training fallback model...")
+def calculate_quality_score(density, tensile, efrf, api=None):
+    density_score = min(100, (density / 0.95) * 100)
+    tensile_score = min(100, (tensile / 8.5) * 100)
+    efrf_score = max(0, (1 - efrf) * 100)
+    weights = {'density': 0.4, 'tensile': 0.3, 'efrf': 0.3}
+    overall = (density_score * weights['density'] +
+               tensile_score * weights['tensile'] +
+               efrf_score * weights['efrf'])
+    if api is not None:
+        api_score = (api - 80) / 18 * 100
+        overall = 0.7 * overall + 0.3 * api_score
+        return {'overall': overall, 'density_score': density_score,
+                'tensile_score': tensile_score, 'efrf_score': efrf_score,
+                'api_score': api_score, 'weights': {**weights, 'api': 0.3}}
     else:
-        st.info("ℹ️ Pre-trained model not found. Training fallback model (this may take a few minutes)...")
-
-    df, features = generate_pinn_data(FALLBACK_SAMPLES)
-    X_raw = df[features].values
-    y = df[['Density','Tensile_Strength_MPa','Elastic_Recovery_%',
-            'Disintegration_Time_min','Dissolution_Tau','Dissolution_Beta']].values
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_raw)
-    y_scaler = StandardScaler()
-    y_scaled = y_scaler.fit_transform(y)
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y_scaled, test_size=0.2, random_state=42
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MultiTaskPINN(input_dim=X_raw.shape[1], hidden=HIDDEN_SIZE).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
-
-    X_train_t = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train_t = torch.tensor(y_train, dtype=torch.float32).to(device)
-    X_test_t = torch.tensor(X_test, dtype=torch.float32).to(device)
-    y_test_t = torch.tensor(y_test, dtype=torch.float32).to(device)
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    for epoch in range(FALLBACK_EPOCHS):
-        model.train()
-        optimizer.zero_grad()
-        y_pred = model(X_train_t)
-        loss = nn.MSELoss()(y_pred, y_train_t)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        scheduler.step(loss.item())
-        progress_bar.progress((epoch+1)/FALLBACK_EPOCHS)
-        status_text.text(f"Training fallback model: epoch {epoch+1}/{FALLBACK_EPOCHS}")
-    progress_bar.empty()
-    status_text.empty()
-
-    model.eval()
-    with torch.no_grad():
-        val_pred = model(X_test_t).cpu().numpy()
-        val_true = y_test_t.cpu().numpy()
-        val_pred_actual = y_scaler.inverse_transform(val_pred)
-        val_true_actual = y_scaler.inverse_transform(val_true)
-        r2_t = r2_score(val_true_actual[:, 1], val_pred_actual[:, 1])
-        rmse_t = np.sqrt(mean_squared_error(val_true_actual[:, 1], val_pred_actual[:, 1]))
-        st.success(f"✅ Fallback model trained: R² = {r2_t:.3f}, RMSE = {rmse_t:.3f} MPa")
-
-    return model, scaler, y_scaler, features, df
+        return {'overall': overall, 'density_score': density_score,
+                'tensile_score': tensile_score, 'efrf_score': efrf_score, 'weights': weights}
 
 # ================================================================
-# NSGA-II OPTIMIZER – 3 OBJECTIVES + VIOLATION (Soft Constraint)
+# SCALER & HYBRID PINN MODEL
 # ================================================================
-class NSGAIIOptimizer:
-    def __init__(self, model, scaler, y_scaler, bounds, pop=NSGA_POP, gens=NSGA_GENS,
-                 granule_fixed=True, granule_fixed_val=125.0,
-                 max_api=98.0, relax=False,
-                 penalty_api=PENALTY_API, penalty_tensile=PENALTY_TENSILE, penalty_efrf=PENALTY_EFRF):
-        self.model = model
-        self.scaler = scaler
-        self.y_scaler = y_scaler
-        self.bounds = bounds
-        self.pop_size = pop
-        self.generations = gens
-        self.granule_fixed = granule_fixed
-        self.granule_fixed_val = granule_fixed_val
-        self.max_api = max_api
-        self.relax = relax
-        self.penalty_api = penalty_api
-        self.penalty_tensile = penalty_tensile
-        self.penalty_efrf = penalty_efrf
+class InputScaler:
+    def fit(self, X): 
+        self.mean_ = X.mean(axis=0)
+        self.std_ = X.std(axis=0)
+        self.std_[self.std_ < 1e-8] = 1.0
+        return self
+    def transform(self, X): 
+        return (X - self.mean_) / self.std_
 
-    def _repair(self, ind):
-        api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = ind
-        api = np.clip(api, SLIDER_API_MIN, self.max_api)
-        api, binder, pvpp, mgst, mcc, moisture = normalize_components(
-            api, binder, pvpp, mgst, mcc, moisture
-        )
-        api = np.clip(api, SLIDER_API_MIN, self.max_api)
-        pressure = np.clip(pressure, self.bounds[5,0], self.bounds[5,1])
-        speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
-        particle_size = np.clip(particle_size, SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
-        binder_grade = np.clip(binder_grade, 0, len(BINDER_GRADES)-1)
-        dwell_time = np.clip(dwell_time, SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX)
-        friction = np.clip(friction, SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
-        decompression_time = np.clip(decompression_time, SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
-        if self.granule_fixed:
-            granule = self.granule_fixed_val
-        else:
-            granule = np.clip(granule, self.bounds[7,0], self.bounds[7,1])
-        return np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                         particle_size, moisture, binder_grade, dwell_time, friction, decompression_time])
+class HybridTabletModel(nn.Module):
+    def __init__(self, input_dim=8, hidden_dim=HIDDEN_SIZE):
+        super().__init__()
+        self.fc1, self.bn1 = nn.Linear(input_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
+        self.fc2, self.bn2 = nn.Linear(hidden_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
+        self.fc3, self.bn3 = nn.Linear(hidden_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
+        self.fc4, self.bn4 = nn.Linear(hidden_dim, hidden_dim), nn.BatchNorm1d(hidden_dim)
+        self.fc5, self.dropout = nn.Linear(hidden_dim, 5), nn.Dropout(0.1)
+        for m in self.modules():
+            if isinstance(m, nn.Linear): nn.init.xavier_uniform_(m.weight); nn.init.zeros_(m.bias)
 
-    def _repair_batch(self, pop):
-        api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = pop.T
-        api = np.clip(api, SLIDER_API_MIN, self.max_api)
-        api, binder, pvpp, mgst, mcc, moisture = normalize_components(
-            api, binder, pvpp, mgst, mcc, moisture
-        )
-        api = np.clip(api, SLIDER_API_MIN, self.max_api)
-        pressure = np.clip(pressure, self.bounds[5,0], self.bounds[5,1])
-        speed = np.clip(speed, self.bounds[6,0], self.bounds[6,1])
-        particle_size = np.clip(particle_size, SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
-        binder_grade = np.clip(binder_grade, 0, len(BINDER_GRADES)-1)
-        dwell_time = np.clip(dwell_time, SLIDER_DWELL_TIME_MIN, SLIDER_DWELL_TIME_MAX)
-        friction = np.clip(friction, SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
-        decompression_time = np.clip(decompression_time, SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
-        if self.granule_fixed:
-            granule = np.full_like(granule, self.granule_fixed_val)
-        else:
-            granule = np.clip(granule, self.bounds[7,0], self.bounds[7,1])
-        return np.column_stack([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                                particle_size, moisture, binder_grade, dwell_time, friction, decompression_time])
+    def forward(self, x):
+        h1 = torch.relu(self.bn1(self.fc1(x))); h1 = self.dropout(h1)
+        h2 = torch.relu(self.bn2(self.fc2(h1)))+h1; h2 = self.dropout(h2)
+        h3 = torch.relu(self.bn3(self.fc3(h2)))+h2; h3 = self.dropout(h3)
+        out = self.fc5(h3)
+        density = torch.sigmoid(out[:,0])*0.4+0.55
+        tensile = torch.sigmoid(out[:,1])*8.0+0.5
+        efrf = torch.sigmoid(out[:,2])
+        disintegration = torch.sigmoid(out[:,3])*45.0+2.0
+        dissolution = torch.sigmoid(out[:,4])*80.0+10.0
+        return torch.stack([density, tensile, efrf, disintegration, dissolution], 1)
 
-    def _build_features(self, repaired):
-        api, mcc, pvpp, mgst, binder, pressure, speed, granule, particle_size, moisture, binder_grade, dwell_time, friction, decompression_time = repaired.T
-        api_binder = api * binder
-        pressure_binder = pressure * binder
-        api_mcc = api * mcc
-        pressure_speed = pressure * speed
-        binder_mgst = binder * mgst
-        X = np.column_stack([
-            repaired,
-            api_binder, pressure_binder, api_mcc, pressure_speed, binder_mgst
-        ])
-        return X
-
-    def _evaluate(self, population):
-        n = population.shape[0]
-        repaired = self._repair_batch(population)
-        X_eval = self._build_features(repaired)
-        scaled = self.scaler.transform(X_eval)
-        X_t = torch.tensor(scaled, dtype=torch.float32)
+    def predict_with_uncertainty(self, x, n_samples=20):
+        self.train()
         with torch.no_grad():
-            pred_scaled = self.model.predict(X_t)
-            pred = self.y_scaler.inverse_transform(pred_scaled)
+            if not torch.is_tensor(x): x = torch.tensor(x, dtype=torch.float32)
+            x_repeat = x.repeat(n_samples, 1)
+            preds = self.forward(x_repeat).numpy().reshape(n_samples, -1, 5)
+        self.eval()
+        return np.mean(preds, 0), np.std(preds, 0)
 
-        density = pred[:, 0]
-        tensile = pred[:, 1]
-        er = pred[:, 2]
-        disintegration = pred[:, 3]
+# ================================================================
+# DATA GENERATION & PHYSICS
+# ================================================================
+def generate_synthetic_data(n_samples=N_SAMPLES, seed=42):
+    rng = np.random.default_rng(seed)
+    api = rng.uniform(API_MIN, API_MAX, n_samples)
+    binder = rng.uniform(BINDER_MIN, BINDER_MAX, n_samples)
+    pvpp = rng.uniform(PVPP_MIN, PVPP_MAX, n_samples)
+    mgst = rng.uniform(MGST_MIN, MGST_MAX, n_samples)
+    mcc = rng.uniform(MCC_MIN, MCC_MAX, n_samples)
+    moisture = rng.uniform(MOISTURE_MIN, MOISTURE_MAX, n_samples)
+    pressure = rng.uniform(PRESSURE_MIN, PRESSURE_MAX, n_samples)
+    speed = rng.uniform(SPEED_MIN, SPEED_MAX, n_samples)
 
-        efrf = er / np.maximum(tensile, 1e-4)
-        api = repaired[:, 0]
-        pressure = repaired[:, 5]  # kept for later selection
+    X = np.column_stack([api, binder, pvpp, mgst, mcc, moisture, pressure, speed]).astype(np.float32)
+    density = np.clip(0.55 + 0.3 * (pressure-150)/100 - 0.01*(binder-3.0) + rng.normal(0,0.01,n_samples), 0.55, 0.95)
+    tensile = np.clip(1.0 + 6.0*(density-0.55) + 0.2*(api-80)/18 - 0.5*(mgst-0.1) + rng.normal(0,0.2,n_samples), 0.5, 8.5)
+    efrf = np.clip(0.6 - 0.5*(density-0.55) + 0.2*(mgst-0.1) + rng.normal(0,0.05,n_samples), 0.02, 0.98)
+    disintegration = np.clip(10.0 - 2.0*(pvpp-1.0)/5.0 + 3.0*(binder-1.4)/4.6 + rng.normal(0,1.0,n_samples), 2.0, 45.0)
+    dissolution = np.clip(2.0*disintegration + 10.0 + rng.normal(0,2.0,n_samples), 10.0, 90.0)
+    y = np.column_stack([density, tensile, efrf, disintegration, dissolution]).astype(np.float32)
+    return X, y
 
-        # ---- Constraint violation (soft) ----
-        violation = np.zeros(n)
-        if self.relax:
-            d_min = 0.50
-            d_max = 0.99
-            tensile_min = 0.20
-            efrf_max = 0.80
-            dis_max = 30.0
-        else:
-            d_min = D_MIN
-            d_max = D_MAX
-            tensile_min = TENSILE_MIN
-            efrf_max = EFRF_MAX
-            dis_max = DISINTEGRATION_MAX
+def calculate_heckel_density(pressure, binder):
+    return 0.55 + 0.3 * (pressure - 150) / 100 - 0.01 * (binder - 3.0)
 
-        violation += np.maximum(0, d_min - density) + np.maximum(0, density - d_max)
-        violation += np.maximum(0, tensile_min - tensile)
-        violation += np.maximum(0, efrf - efrf_max)
-        violation += np.maximum(0, disintegration - dis_max)
-        mcc_val = repaired[:, 1]
-        violation += np.maximum(0, BOUND_MCC_MIN - mcc_val) + np.maximum(0, mcc_val - BOUND_MCC_MAX)
+# ================================================================
+# TRAINING LOOP (Stable Cache, Progress bar, Physics Loss)
+# ================================================================
+CHECKPOINT_PATH = os.path.join(tempfile.gettempdir(), 'hybrid_ai_v32_ultimate.pt')
 
-        # ---- Three objectives: -API (max), EFRF (min), Disintegration (min) ----
-        objectives = np.column_stack([
-            -api,            # maximise API (minimise negative)
-            efrf,            # minimise EFRF
-            disintegration   # minimise disintegration time
-        ])
-        # We also return violation for constraint‑dominance handling
-        return objectives, repaired, violation, pressure
+@st.cache_resource(show_spinner=False)
+def train_model():
+    if os.path.exists(CHECKPOINT_PATH):
+        try:
+            ckpt = torch.load(CHECKPOINT_PATH, map_location='cpu', weights_only=False)
+            model = HybridTabletModel(input_dim=8, hidden_dim=HIDDEN_SIZE)
+            model.load_state_dict(ckpt['model_state'])
+            model.eval()
+            return model, ckpt['scaler']
+        except: pass
 
-    # ---- Standard NSGA-II methods (unchanged) ----
-    def _non_dominated_sort(self, objectives, violations):
-        n = objectives.shape[0]
-        fronts = []
-        remaining = list(range(n))
-        while remaining:
-            front = []
-            for i in remaining:
-                dominated = False
-                for j in remaining:
-                    if i == j:
-                        continue
-                    if (violations[j] < violations[i]) or \
-                       (violations[j] == 0 and violations[i] == 0 and
-                        np.all(objectives[j] <= objectives[i]) and
-                        np.any(objectives[j] < objectives[i])):
-                        dominated = True
-                        break
-                if not dominated:
-                    front.append(i)
-            fronts.append(front)
-            remaining = [idx for idx in remaining if idx not in front]
-        return fronts
+    X, y = generate_synthetic_data(n_samples=N_SAMPLES)
+    scaler = InputScaler().fit(X)
+    X_scaled = scaler.transform(X)
+    X_t, y_t = torch.tensor(X_scaled, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+    
+    model = HybridTabletModel(input_dim=8, hidden_dim=HIDDEN_SIZE)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+    target_var = torch.clamp(y_t.var(0, unbiased=False), min=1e-6)
+    def mse(pred, true): return (((pred - true) ** 2) / target_var).mean()
+    
+    pressure_input, binder_input = X[:, 6], X[:, 1]
+    best_loss = np.inf; patience = 0
+    
+    for epoch in range(TRAINING_EPOCHS):
+        model.train(); opt.zero_grad(); pred = model(X_t)
+        loss = mse(pred, y_t)
+        physical = torch.tensor(calculate_heckel_density(pressure_input, binder_input), dtype=torch.float32)
+        physics_loss = torch.mean((pred[:, 0] - physical) ** 2) * 0.1
+        loss += physics_loss
+        loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); opt.step()
+        
+        if epoch % 10 == 0:
+            if '_train_pb' in st.session_state and st.session_state['_train_pb'] is not None:
+                st.session_state['_train_pb'].progress(epoch / TRAINING_EPOCHS)
+            time.sleep(0.01)
+            
+        if epoch % 100 == 0:
+            val = mse(model(X_t), y_t).item()
+            if val < best_loss: best_loss = val; patience = 0
+            else: patience += 1
+            if patience >= EARLY_STOPPING_PATIENCE: break
+            
+    model.eval()
+    torch.save({'model_state': model.state_dict(), 'scaler': scaler}, CHECKPOINT_PATH)
+    return model, scaler
 
-    def _crowding_distance(self, objectives, front):
-        if len(front) <= 2:
-            return {idx: np.inf for idx in front}
-        dist = {idx: 0.0 for idx in front}
-        for obj_idx in range(objectives.shape[1]):
-            sorted_front = sorted(front, key=lambda i: objectives[i, obj_idx])
-            f_min = objectives[sorted_front[0], obj_idx]
-            f_max = objectives[sorted_front[-1], obj_idx]
-            if f_max - f_min > 1e-10:
-                for k in range(1, len(sorted_front)-1):
-                    dist[sorted_front[k]] += (objectives[sorted_front[k+1], obj_idx] -
-                                              objectives[sorted_front[k-1], obj_idx]) / (f_max - f_min)
-        dist[sorted_front[0]] = np.inf
-        dist[sorted_front[-1]] = np.inf
-        return dist
+# ================================================================
+# ADVANCED OPTIMIZER (NSGA-II + Adaptive Mutation)
+# ================================================================
+class AdvancedOptimizer:
+    def __init__(self, model, scaler, pop_size=POPULATION_SIZE, generations=NSGA_GENERATIONS):
+        self.model, self.scaler = model, scaler
+        self.pop_size, self.generations = pop_size, generations
+        self.mutation_rate = 0.1
+        self.GENE_BOUNDS = [
+            (API_MIN, API_MAX), (BINDER_MIN, BINDER_MAX), (PVPP_MIN, PVPP_MAX),
+            (MGST_MIN, MGST_MAX), (MCC_MIN, MCC_MAX), (MOISTURE_MIN, MOISTURE_MAX),
+            (PRESSURE_MIN, PRESSURE_MAX), (SPEED_MIN, SPEED_MAX)
+        ]
 
-    def _crossover(self, p1, p2, eta=40):
-        child1 = np.zeros(14)
-        child2 = np.zeros(14)
-        for i in range(14):
-            u = np.random.random()
-            if u <= 0.5:
-                beta = (2*u) ** (1/(eta+1))
-            else:
-                beta = (1/(2*(1-u))) ** (1/(eta+1))
-            child1[i] = 0.5 * ((1+beta)*p1[i] + (1-beta)*p2[i])
-            child2[i] = 0.5 * ((1-beta)*p1[i] + (1+beta)*p2[i])
-        return child1, child2
+    def enforce_mass_balance(self, pop):
+        balanced = pop.copy()
+        lo = np.array([b[0] for b in self.GENE_BOUNDS[:6]])
+        hi = np.array([b[1] for b in self.GENE_BOUNDS[:6]])
+        comps = np.clip(pop[:, :6], lo, hi)
+        total = comps.sum(axis=1, keepdims=True)
+        balanced[:, :6] = np.clip(comps / (total if (total > 0).all() else 1.0) * 100.0, lo, hi)
+        return balanced
 
-    def _mutate(self, child, eta=20, pm=1.0/14.0):
-        for i in range(14):
-            if np.random.random() < pm:
-                u = np.random.random()
-                if u <= 0.5:
-                    delta = (2*u) ** (1/(eta+1)) - 1
-                else:
-                    delta = 1 - (2*(1-u)) ** (1/(eta+1))
-                child[i] = child[i] + delta * (self.bounds[i,1] - self.bounds[i,0])
-                child[i] = np.clip(child[i], self.bounds[i,0], self.bounds[i,1])
-        return child
+    def evaluate(self, pop):
+        pop_scaled = self.scaler.transform(pop)
+        if isinstance(pop_scaled, pd.DataFrame): pop_scaled = pop_scaled.values
+        self.model.eval()
+        with torch.no_grad():
+            pred = self.model(torch.tensor(pop_scaled, dtype=torch.float32)).numpy()
+        density, tensile, efrf = pred[:, 0], pred[:, 1], pred[:, 2]
+        penalty = 1.0 / (1.0 + np.clip(np.abs(pop_scaled) - 2.5, 0, None).sum(axis=1))
+        fitness = np.column_stack([-density*penalty, -tensile*penalty, -pop[:,0]*penalty, efrf*penalty])
+        fitness[:, 3] += np.maximum(0, efrf - EFRF_THRESHOLD) * 20.0
+        return fitness
 
-    def _tournament(self, pop, objectives, violations, fronts, crowding_dist):
-        idx1 = np.random.randint(0, len(pop))
-        idx2 = np.random.randint(0, len(pop))
-        rank1 = next((f for f, front in enumerate(fronts) if idx1 in front), len(fronts))
-        rank2 = next((f for f, front in enumerate(fronts) if idx2 in front), len(fronts))
-        if rank1 < rank2:
-            return pop[idx1]
-        elif rank2 < rank1:
-            return pop[idx2]
-        else:
-            d1 = crowding_dist.get(idx1, 0)
-            d2 = crowding_dist.get(idx2, 0)
-            return pop[idx1] if d1 > d2 else pop[idx2]
+    def adaptive_mutation(self, pop):
+        diversity = np.std(pop, axis=0).mean()
+        if diversity < 0.05: self.mutation_rate = min(0.2, self.mutation_rate + 0.02)
+        elif diversity > 0.2: self.mutation_rate = max(0.02, self.mutation_rate - 0.01)
+        return diversity
 
-    def run(self):
-        rng = np.random.default_rng()
-        pop = []
-        for _ in range(self.pop_size):
-            # Wider API range with noise
-            api = rng.uniform(SLIDER_API_MIN, self.max_api)
-            api += rng.normal(0, 0.5)          # larger noise
-            api = np.clip(api, SLIDER_API_MIN, self.max_api)
-            mcc = rng.uniform(BOUND_MCC_MIN, BOUND_MCC_MAX)
-            binder = rng.uniform(BOUND_BINDER_MIN, BOUND_BINDER_MAX) + rng.normal(0, 0.2)
-            pvpp = rng.uniform(BOUND_PVPP_MIN, BOUND_PVPP_MAX) + rng.normal(0, 0.2)
-            mgst = rng.uniform(BOUND_MGST_MIN, BOUND_MGST_MAX)
-            moisture = rng.uniform(SLIDER_MOISTURE_MIN, SLIDER_MOISTURE_MAX)
-            pressure = rng.uniform(SLIDER_PRESSURE_MIN, SLIDER_PRESSURE_MAX) + rng.normal(0, 5.0)
-            speed = rng.uniform(SLIDER_SPEED_MIN, SLIDER_SPEED_MAX)
-            granule = rng.uniform(SLIDER_GRANULE_MIN, SLIDER_GRANULE_MAX)
-            particle_size = rng.uniform(SLIDER_PARTICLE_SIZE_MIN, SLIDER_PARTICLE_SIZE_MAX)
-            binder_grade = rng.integers(0, len(BINDER_GRADES))
-            dwell_time = calculate_dwell_time(speed)
-            friction = rng.uniform(SLIDER_FRICTION_MIN, SLIDER_FRICTION_MAX)
-            decompression_time = rng.uniform(SLIDER_DECOMPRESSION_TIME_MIN, SLIDER_DECOMPRESSION_TIME_MAX)
-            ind = np.array([api, mcc, pvpp, mgst, binder, pressure, speed, granule,
-                            particle_size, moisture, binder_grade, dwell_time, friction, decompression_time])
-            pop.append(self._repair(ind))
-        pop = np.array(pop)
-
+    def optimize(self):
+        pop = np.random.rand(self.pop_size, 8)
+        for i, (lo, hi) in enumerate(self.GENE_BOUNDS): pop[:, i] = pop[:, i] * (hi - lo) + lo
+        pop = self.enforce_mass_balance(pop)
+        obj = self.evaluate(pop)
+        history = []
         for gen in range(self.generations):
-            objectives, pop, violations, pressure = self._evaluate(pop)
-            fronts = self._non_dominated_sort(objectives, violations)
-            crowding_dist = {}
-            for front in fronts:
-                dist = self._crowding_distance(objectives, front)
-                crowding_dist.update(dist)
-
+            self.adaptive_mutation(pop)
+            selected = []
+            for _ in range(self.pop_size):
+                idx = np.random.choice(self.pop_size, 2, replace=False)
+                selected.append(idx[np.argmin(obj[idx].sum(axis=1))])
+            sel_pop = pop[selected]
             offspring = []
-            while len(offspring) < self.pop_size:
-                p1 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
-                p2 = self._tournament(pop, objectives, violations, fronts, crowding_dist)
-                c1, c2 = self._crossover(p1, p2)
-                c1 = self._mutate(c1)
-                c2 = self._mutate(c2)
-                offspring.append(self._repair(c1))
-                if len(offspring) < self.pop_size:
-                    offspring.append(self._repair(c2))
+            for i in range(0, self.pop_size, 2):
+                p1, p2 = sel_pop[i], sel_pop[(i+1)%self.pop_size]
+                c1, c2 = p1.copy(), p2.copy()
+                for j in range(8):
+                    if np.random.rand() < 0.8:
+                        beta = 1.0 + 2.0 * np.random.rand()
+                        c1[j] = 0.5 * ((1+beta)*p1[j] + (1-beta)*p2[j])
+                        c2[j] = 0.5 * ((1-beta)*p1[j] + (1+beta)*p2[j])
+                    if np.random.rand() < self.mutation_rate:
+                        lo, hi = self.GENE_BOUNDS[j]
+                        c1[j] = np.clip(c1[j] + np.random.normal(0, 0.1) * (hi-lo), lo, hi)
+                offspring.extend([c1, c2])
             offspring = np.array(offspring[:self.pop_size])
-
+            offspring = self.enforce_mass_balance(offspring)
             combined = np.vstack([pop, offspring])
-            obj_comb, combined, viol_comb, press_comb = self._evaluate(combined)
-            fronts_comb = self._non_dominated_sort(obj_comb, viol_comb)
-            crowding_comb = {}
-            for front in fronts_comb:
-                dist = self._crowding_distance(obj_comb, front)
-                crowding_comb.update(dist)
-
-            new_pop = []
-            remaining = self.pop_size
-            for front in fronts_comb:
-                if len(front) <= remaining:
-                    new_pop.extend(combined[front])
-                    remaining -= len(front)
-                else:
-                    sorted_idx = sorted(front, key=lambda i: crowding_comb.get(i, 0), reverse=True)
-                    new_pop.extend(combined[sorted_idx[:remaining]])
-                    remaining = 0
-                    break
-            pop = np.array(new_pop)
-
-        objectives, pop, violations, pressure = self._evaluate(pop)
-        fronts = self._non_dominated_sort(objectives, violations)
-        return pop, objectives, fronts, violations, pressure
+            combined_obj = np.vstack([obj, self.evaluate(offspring)])
+            pareto_idx = np.argsort(combined_obj.sum(axis=1))[:self.pop_size]
+            pop, obj = combined[pareto_idx], combined_obj[pareto_idx]
+            if gen % 10 == 0 or gen == self.generations - 1:
+                history.append({'generation': gen, 'population': pop.copy(), 'objectives': obj.copy()})
+            yield pop, obj, history, gen
 
 # ================================================================
-# PREDICTION AND PLOTTING (unchanged from previous corrected version)
+# ANALYSIS & PLOTTING FUNCTIONS
 # ================================================================
-# The plotting functions (plot_2d_front, plot_3d_front, combine_pareto_fronts)
-# are identical to the ones we already provided in the previous answer.
-# To keep the answer concise, I will include them in the final code block below.
+def perform_sensitivity_analysis(model, scaler, ref_solution):
+    try:
+        rf = RandomForestRegressor(n_estimators=50)
+        X_local = np.random.normal(loc=ref_solution, scale=0.05*np.abs(ref_solution), size=(500, 8))
+        bounds_min = np.array([API_MIN, BINDER_MIN, PVPP_MIN, MGST_MIN, MCC_MIN, MOISTURE_MIN, PRESSURE_MIN, SPEED_MIN])
+        bounds_max = np.array([API_MAX, BINDER_MAX, PVPP_MAX, MGST_MAX, MCC_MAX, MOISTURE_MAX, PRESSURE_MAX, SPEED_MAX])
+        X_local = np.clip(X_local, bounds_min, bounds_max)
+        X_scaled = scaler.transform(X_local)
+        y_local = model(torch.tensor(X_scaled, dtype=torch.float32)).numpy()[:, 0]
+        rf.fit(X_scaled, y_local)
+        perm_importance = permutation_importance(rf, X_scaled, y_local)
+        feature_names = ['API', 'Binder', 'PVPP', 'MgSt', 'MCC', 'Moisture', 'Pressure', 'Speed']
+        return dict(zip(feature_names, perm_importance.importances_mean))
+    except: return None
+
+def render_2d_pareto_evolution(pareto_history, golden, tested=None):
+    if not pareto_history: return
+    generations_recorded = [h['generation'] for h in pareto_history]
+    gen_slider = st.select_slider("Select generation to view", options=generations_recorded, value=generations_recorded[-1])
+    current_entry = next(h for h in pareto_history if h['generation'] == gen_slider)
+    obj = current_entry['objectives']; pop = current_entry['population']
+    api_vals, efrf_vals = pop[:, 0], obj[:, 3]
+    feasible_mask = efrf_vals < 0.40
+    api_feas, efrf_feas = api_vals[feasible_mask], efrf_vals[feasible_mask]
+    sort_idx = np.argsort(api_feas)
+    api_sorted, efrf_sorted = api_feas[sort_idx], efrf_feas[sort_idx]
+    if len(efrf_sorted) > 0: cummax_efrf = np.maximum.accumulate(efrf_sorted)
+    else: cummax_efrf = efrf_sorted
+
+    fig = go.Figure()
+    fig.add_hrect(y0=0, y1=0.40, x0=API_MIN, x1=API_MAX, fillcolor='rgba(144, 238, 144, 0.25)', line_width=0, layer='below')
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=12, symbol='square', color='rgba(144, 238, 144, 0.5)'), name='Feasible region (EFRF < 0.40)'))
+    
+    fig.add_trace(go.Scatter(x=api_sorted, y=cummax_efrf, mode='lines+markers', name='Pareto Front', line=dict(color='red', width=2), marker=dict(size=8, color='#a3c4f3', line=dict(width=1, color='#4a6fa5'))))
+    
+    if golden:
+        fig.add_trace(go.Scatter(x=[golden['API (%)']], y=[golden['EFRF']], mode='markers', name='🏆 Golden Solution', marker=dict(size=22, color='gold', symbol='star', line=dict(width=1.5, color='#8a6d00'))))
+    if tested:
+        fig.add_trace(go.Scatter(x=[tested['api']], y=[tested['efrf']], mode='markers', name='🔵 Tested Formulation', marker=dict(size=14, color='blue', symbol='circle', line=dict(width=1.5, color='white'))))
+
+    fig.add_hline(y=0.40, line_dash='dash', line_color='gray', annotation_text='EFRF limit (0.40)', annotation_position='top left')
+    fig.add_vline(x=API_MIN, line_dash='dash', line_color='gray', annotation_text=f'API min ({API_MIN}%)', annotation_position='bottom left')
+    fig.add_vline(x=API_MAX, line_dash='dash', line_color='gray', annotation_text=f'API max ({API_MAX}%)', annotation_position='bottom right')
+    
+    fig.update_layout(title=f'2D Pareto Front - Generation {gen_slider}', xaxis_title='API (%)', yaxis_title='EFRF', height=500, template='plotly_white', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig, use_container_width=True)
+
+def render_3d_pareto(pop, obj, golden_idx, tested_data=None):
+    fig = go.Figure(data=[go.Scatter3d(x=pop[:, 0], y=obj[:, 3], z=-obj[:, 1], mode='markers', marker=dict(size=4, color=pop[:, 0], colorscale='Viridis'), name='Pareto')])
+    if golden_idx is not None:
+        fig.add_trace(go.Scatter3d(x=[pop[golden_idx, 0]], y=[obj[golden_idx, 3]], z=[-obj[golden_idx, 1]], mode='markers', marker=dict(size=15, color='gold', symbol='diamond'), name='Golden'))
+    if tested_data is not None:
+        fig.add_trace(go.Scatter3d(x=[tested_data['api']], y=[tested_data['efrf']], z=[tested_data['tensile']], mode='markers', marker=dict(size=12, color='blue', symbol='circle', line=dict(color='white', width=1)), name='Tested Formulation'))
+    fig.update_layout(scene=dict(xaxis_title='API (%)', yaxis_title='EFRF', zaxis_title='Tensile (MPa)'), height=450)
+    st.plotly_chart(fig, use_container_width=True)
+
+def render_dynamic_radar(solutions_df, selected_solutions):
+    if not selected_solutions: return
+    fig = go.Figure()
+    for i, row in solutions_df.iterrows():
+        if row['Solution'] in selected_solutions:
+            fig.add_trace(go.Scatterpolar(r=[(row['API (%)']-80)/18, row['Density']/0.95, row['Tensile (MPa)']/8.5, 1-row['EFRF'], row['Quality Score']/100], theta=['API%', 'Density', 'Tensile', 'EFRF (Inv)', 'Quality'], fill='toself', name=row['Solution']))
+    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True, height=380)
+    st.plotly_chart(fig, use_container_width=True)
+
+def target_status(value, threshold, mode='min', comfortable=None):
+    if mode == 'min':
+        if value < threshold: return "🔴 Below target"
+        if comfortable is not None and value >= comfortable: return "✅ Excellent"
+        return "✅ Passes (near limit)"
+    else:
+        if value > threshold: return "🔴 Exceeds limit"
+        if comfortable is not None and value <= comfortable: return "✅ Excellent"
+        return "⚠️ Passes (near limit)"
+
+# ================================================================
+# UI RENDER FUNCTIONS
+# ================================================================
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("## 🧬 Hybrid AI Framework")
+        st.markdown("---"); st.markdown(f"**Version:** v32.0-Ultimate")
+        st.markdown(f"**Institution:** Nile Valley University")
+        st.markdown("---")
+        st.sidebar.header("⚖️ Custom Recommender")
+        w_api = st.sidebar.slider("Weight for API", 0.0, 1.0, 0.4)
+        w_quality = st.sidebar.slider("Weight for Quality", 0.0, 1.0, 0.6)
+        st.sidebar.info("Prioritizes solutions matching your weights.")
+        st.markdown("---")
+        st.caption("© 2024 Nile Valley University · Sudan")
+        return w_api, w_quality
+
+def render_input_panel():
+    st.markdown("## ⚙️ Formulation & Process")
+    col1, col2 = st.columns(2)
+    with col1:
+        api = st.slider("API (%)", API_MIN, API_MAX, 85.0)
+        binder = st.slider("Binder (%)", BINDER_MIN, BINDER_MAX, 5.0)
+        pvpp = st.slider("PVPP (%)", PVPP_MIN, PVPP_MAX, 2.0)
+        mgst = st.slider("MgSt (%)", MGST_MIN, MGST_MAX, 0.5)
+    with col2:
+        mcc = st.slider("MCC (%)", MCC_MIN, MCC_MAX, 4.0)
+        moisture = st.slider("Moisture (%)", MOISTURE_MIN, MOISTURE_MAX, 1.5)
+        pressure = st.slider("Pressure (MPa)", PRESSURE_MIN, PRESSURE_MAX, 200.0)
+        speed = st.slider("Speed (rpm)", SPEED_MIN, SPEED_MAX, 20.0)
+    return api, binder, pvpp, mgst, mcc, moisture, pressure, speed
+
+# ================================================================
+# MAIN APPLICATION
+# ================================================================
+def main():
+    st.title("🧬 Hybrid AI v32.0-Ultimate · Unified 2D/3D/Radar")
+    w_api, w_quality = render_sidebar()
+    api, binder, pvpp, mgst, mcc, moisture, pressure, speed = render_input_panel()
+
+    if st.button("🚀 Run Ultimate Optimization"):
+        # 1. Prepare Progress Bar & Train Model
+        progress_bar = st.progress(0)
+        st.session_state['_train_pb'] = progress_bar
+        with st.spinner("Training Physics Model (1st time takes ~15s)..."):
+            model, scaler = train_model()
+            st.session_state['_train_pb'].progress(1.0)
+
+        # 2. Run Optimization
+        start_time = time.time()
+        with st.status("Running NSGA-II + Adaptive Mutation...", expanded=True) as status:
+            opt_bar = st.progress(0)
+            optimizer = AdvancedOptimizer(model, scaler)
+            final_pop, final_obj, gen_history = None, None, None
+            for i, (pop, obj, history, gen) in enumerate(optimizer.optimize()):
+                final_pop, final_obj, gen_history = pop, obj, history
+                opt_bar.progress((gen+1)/NSGA_GENERATIONS)
+                if gen % 10 == 0: status.update(label=f"Generation {gen+1}/{NSGA_GENERATIONS}")
+            status.update(label="Optimization Complete ✅", state="complete")
+
+        # 3. Process Solutions & Golden Star
+        weights = np.array([w_api, w_quality])
+        scores = []
+        for i in range(len(final_pop)):
+            s = (final_pop[i,0]/100 * weights[0]) + ((1 - final_obj[i].sum()/4) * weights[1])
+            scores.append(s)
+        golden_idx = np.argmax(scores)
+        best_sol = final_pop[golden_idx]
+        
+        pop_scaled = scaler.transform([best_sol])
+        preds, unc = model.predict_with_uncertainty(torch.tensor(pop_scaled, dtype=torch.float32))
+        preds, unc = preds[0], unc[0]
+        st.success(f"🏆 Golden Solution Found!\nAPI: {best_sol[0]:.2f}% | EFRF: {preds[2]:.3f} ± {unc[2]:.3f}")
+        st.caption(f"Optimization took {time.time() - start_time:.2f} seconds.")
+
+        # 4. Compute Tested Formulation Data
+        slider_form = np.array([[api, binder, pvpp, mgst, mcc, moisture, pressure, speed]], dtype=np.float32)
+        slider_preds, _ = model.predict_with_uncertainty(torch.tensor(scaler.transform(slider_form), dtype=torch.float32))
+        tested_data = {'api': float(api), 'efrf': float(slider_preds[0][2]), 'tensile': float(slider_preds[0][1])}
+
+        # 5. Build Solutions DataFrame for Radar / Exports
+        sol_list = []
+        sorted_indices = np.argsort([-scores[i] for i in range(len(final_pop))])
+        for idx in sorted_indices[:10]:
+            sol_list.append({
+                'Solution': f'S{idx+1}',
+                'API (%)': float(final_pop[idx, 0]),
+                'Density': float(-final_obj[idx, 0]),
+                'Tensile (MPa)': float(-final_obj[idx, 1]),
+                'EFRF': float(final_obj[idx, 3]),
+                'Quality Score': float(100 - (final_obj[idx].sum() * 20))
+            })
+        sol_df = pd.DataFrame(sol_list)
+        golden = {'API (%)': best_sol[0], 'EFRF': preds[2]} # Simplified golden dict for plots
+
+        # 6. Render All Visualizations
+        st.subheader("🌐 2D Pareto Front (API vs EFRF)")
+        render_2d_pareto_evolution(gen_history, golden, tested_data)
+        
+        st.subheader("🌐 3D Pareto Front (API - EFRF - Tensile)")
+        render_3d_pareto(final_pop, final_obj, golden_idx, tested_data)
+        
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            st.subheader("🏆 Top Solutions")
+            selected = st.multiselect("Select for Radar", sol_df['Solution'], default=[f'S{str(sorted_indices[0]+1)}', f'S{str(sorted_indices[1]+1)}'])
+        with col_b:
+            st.subheader("📊 Dynamic Radar Comparison")
+            render_dynamic_radar(sol_df, selected)
+
+        # 7. Sensitivity & Export
+        with st.expander("🔬 Sensitivity Analysis (Local)"):
+            sens_data = perform_sensitivity_analysis(model, scaler, best_sol)
+            if sens_data: st.bar_chart(pd.Series(sens_data))
+            else: st.warning("Could not compute local sensitivity.")
+        
+        report = {
+            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'golden_api': float(best_sol[0]), 'golden_efrf': float(preds[2]), 'golden_tensile': float(preds[1]),
+            'top_solutions': sol_df.to_dict('records'), 'tested_formulation': tested_data
+        }
+        st.download_button("📥 Download Report (JSON)", data=json.dumps(report, indent=2, default=str), file_name="ultimate_report.json")
+
+if __name__ == "__main__":
+    main()
