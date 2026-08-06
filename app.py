@@ -1207,18 +1207,18 @@ def render_pareto_evolution():
         marker=dict(size=8, color='#a3c4f3', line=dict(width=1, color='#4a6fa5')),
         hovertemplate='API: %{x:.2f}%<br>EFRF: %{y:.3f}<extra></extra>'
     ))
-    # ---- REGION WHERE NO SOLUTIONS WERE FOUND (was: a fabricated
-    # straight line drawn to the (API_MAX, 0.40) corner, styled
-    # identically to the real front — it visually implied optimizer
-    # results existed above the highest API actually reached, when
-    # nothing was ever evaluated there. Replaced with a clearly
-    # non-data-bearing shaded band + label so the boundary between
-    # "real result" and "outside what was explored" is unambiguous. ----
+    # ---- REGION WHERE NO SOLUTIONS WERE FOUND ----
     if len(api_sorted) > 0 and api_sorted[-1] < API_MAX:
         last_api = api_sorted[-1]
-        fig.add_vrect(
-            x0=last_api, x1=API_MAX, y0=0, y1=1, yref='paper',
-            fillcolor='rgba(150,150,150,0.10)', line_width=0, layer='below'
+        # FIX: Use add_shape instead of add_vrect to avoid yref='paper' error
+        fig.add_shape(
+            type="rect",
+            x0=last_api, x1=API_MAX,
+            y0=0, y1=1,
+            xref='x', yref='paper',
+            fillcolor='rgba(150,150,150,0.10)',
+            line_width=0,
+            layer='below'
         )
         fig.add_annotation(
             x=(last_api + API_MAX) / 2, y=0.40, yshift=14, showarrow=False,
@@ -1257,10 +1257,6 @@ def render_pareto_evolution():
                   annotation_text=f'API min ({API_MIN}%)', annotation_position='bottom left')
     fig.add_vline(x=API_MAX, line_dash='dash', line_color='gray',
                   annotation_text=f'API max ({API_MAX}%)', annotation_position='bottom right')
-    # Both the title and the caption below now use the same 1-indexed
-    # "generation N of M" convention (gen_slider is a 0-indexed recorded
-    # generation index), instead of the title showing gen_slider (0-indexed)
-    # while the caption showed gen_slider+1 (1-indexed).
     gen_display = gen_slider + 1
     fig.update_layout(
         title=f'Pareto Front - Generation {gen_display}/{NSGA_GENERATIONS}',
